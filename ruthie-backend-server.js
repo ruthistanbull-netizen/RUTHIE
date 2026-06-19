@@ -22,6 +22,7 @@ const EVENTS_PATH = path.join(DATA_DIR, "conversation-events.jsonl");
 const ownerChallenges = new Set();
 const conversationMemory = new Map();
 const recentImageSessions = new Map();
+const lastProductSessions = new Map();
 const pendingOrderSessions = new Set();
 const pendingProductSessions = new Set();
 let ikasTokenCache = { token: "", expiresAt: 0 };
@@ -341,7 +342,11 @@ async function answerWithOpenAI({ message, sessionId, visitorName, pageUrl, page
   const rawText = extractOutputText(data).trim();
   const cleaned = rawText.replace(/^WHATSAPP_YONLENDIR\s*[:\-]?\s*/i, "").trim();
   const handoff = /^WHATSAPP_YONLENDIR/i.test(rawText);
-  const messageText = sanitizeCustomerMessage(cleaned || "Bu konu icin sizi WhatsApp destek ekibimize yonlendirmem en dogrusu.");
+  let messageText = sanitizeCustomerMessage(cleaned || "Bu konu icin sizi WhatsApp destek ekibimize yonlendirmem en dogrusu.");
+
+  if (shouldBlockUnverifiedPrice(message, messageText, liveContext)) {
+    messageText = "Panelde dogrulanmayan bir fiyat paylasamam. Urun adini ya da urun linkini yazarsaniz fiyat bilgisini panelden kontrol ederek yardimci olabilirim.";
+  }
 
   rememberTurn(sessionId, message, messageText);
 
@@ -442,7 +447,13 @@ function buildAssistantInstructions() {
     "Sen RUTH ISTANBUL magazasi icin calisan Ruthie adli musteri hizmetleri asistanisin.",
     "Turkce konus. Tonun sicak, kisa, net ve butik taki markasina uygun zarif olsun.",
     "Musteri urun, siparis, kargo, iade, degisim, beden/olcu ve bakim konularinda soru sorabilir.",
+    "Musterinin her mesajini once niyetine gore degerlendir: urun sorusu mu, siparis mi, iade/degisim mi, garanti/bakim mi, genel sohbet mi, yoksa onceki cevaba itiraz mi?",
+    "Onceki urun konusmasini otomatik devam ettirme; musteri baska bir sey sorarsa o yeni soruya gore cevap ver.",
+    "Genel sohbet ve basit sorularda dogal cevap ver; her seyi urun sorusu gibi algilama.",
     "Kesin bilmedigin fiyat, siparis durumu, kargo hareketi veya kisisel veri iceren konularda asla uydurma.",
+    "Fiyati sadece musteri acikca fiyat, ne kadar, kac TL veya ucret diye sorarsa ve IKAS CANLI PANEL VERILERI icinde dogrulanmis fiyat varsa soyle.",
+    "Musteri sadece urun adi yazarsa urunu buldugunu ve linkini soyle; kendiliginden fiyat yazma.",
+    "Onceki konusmada gecen veya senin urettigin bir fiyati gercek kabul etme; panelde dogrulanmayan fiyatlari tekrar etme.",
     "Musteriye hicbir durumda stok, adet, kalan urun veya var/yok bilgisi verme; bu tip sorularda urun adi ya da urun linki iste.",
     "Siparis durumu sorulursa siparis numarasi ve sipariste kullanilan e-posta/telefon bilgisini iste; canli magaza paneli bagli degilse net durum soyleme.",
     "IKAS CANLI PANEL VERILERI basligi gelirse urun, fiyat ve siparis cevaplarinda bu verileri oncelikli kullan.",
@@ -549,12 +560,23 @@ function isAvailabilityQuestion(message) {
 
 function sanitizeCustomerMessage(value) {
   return String(value || "")
+    .replace(/^ruthie\s*[:\-]\s*/i, "")
     .replace(/\bstok[a-z]*/gi, "urun uygunlugu")
     .replace(/\bsto\u011f[a-z]*/gi, "urun uygunlugu")
     .replace(/\bstock[a-z]*/gi, "product availability")
     .replace(/[ \t]+/g, " ")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
+}
+
+function shouldBlockUnverifiedPrice(userMessage, assistantMessage, liveContext) {
+  if (!containsPriceText(assistantMessage)) return false;
+  if (!isPriceQuestion(userMessage)) return true;
+  return !containsPriceText(liveContext);
+}
+
+function containsPriceText(value) {
+  return /\b\d+(?:[.,]\d+)?\s*(?:tl|try|₺)\b/i.test(String(value || ""));
 }
 
 async function answerFromIkasPanelIfPossible(message, page, sessionId) {
@@ -612,8 +634,23 @@ async function answerFromIkasPanelIfPossible(message, page, sessionId) {
 }
 
 async function answerProductFromIkasPanelIfPossible(message, page, sessionId) {
-  const shouldHandleProduct = isProductInfoRequest(message, page) || pendingProductSessions.has(sessionId);
-  if (!shouldHandleProduct) return null;
+  const pendingProduct = pendingProductSessions.has(sessionId);
+  const term = extractProductSearchTerm(message, page);
+  const explicitProductRequest = isProductInfoRequest(message, page);
+  const lastProduct = lastProductSessions.get(sessionId);
+
+  if (!term && lastProduct && isProductFollowupRequest(message)) {
+    pendingProductSessions.delete(sessionId);
+    return {
+      message: formatProductDetailAnswer(lastProduct, message)
+    };
+  }
+
+  const shouldHandleProduct = explicitProductRequest || (pendingProduct && Boolean(term));
+  if (!shouldHandleProduct) {
+    if (pendingProduct) pendingProductSessions.delete(sessionId);
+    return null;
+  }
 
   if (!isIkasConfigured()) {
     return {
@@ -622,7 +659,6 @@ async function answerProductFromIkasPanelIfPossible(message, page, sessionId) {
     };
   }
 
-  const term = extractProductSearchTerm(message, page);
   if (!term || isGenericProductRequest(message)) {
     pendingProductSessions.add(sessionId);
     return {
@@ -640,8 +676,9 @@ async function answerProductFromIkasPanelIfPossible(message, page, sessionId) {
     }
 
     pendingProductSessions.delete(sessionId);
+    if (products.length === 1) rememberLastProduct(sessionId, products[0]);
     return {
-      message: formatProductAnswer(products)
+      message: formatProductAnswer(products, { includePrice: isPriceQuestion(message) })
     };
   } catch (error) {
     console.error("Ikas product lookup error:", error && error.message ? error.message : error);
@@ -660,7 +697,10 @@ async function buildIkasLiveContext(message, page) {
     const products = await findIkasProducts(extractProductSearchTerm(message, page));
     if (!products.length) return "Panelde bu soruyla eslesen urun bulunamadi.";
 
-    return products.map((product) => formatProductContext(product)).join("\n---\n").slice(0, 10000);
+    return products
+      .map((product) => formatProductContext(product, { includePrice: isPriceQuestion(message) }))
+      .join("\n---\n")
+      .slice(0, 10000);
   } catch (error) {
     console.error("Ikas live product context error:", error && error.message ? error.message : error);
     return "Ikas panelinden urun bilgisi alinamadi; kesin fiyat bilgisi verme.";
@@ -679,7 +719,6 @@ async function buildPhotoCatalogContext() {
       return [
         `Urun: ${product.name}`,
         description ? `Aciklama: ${description}` : "",
-        `Fiyat: ${getProductPriceText(product)}`,
         link ? `Link: ${link}` : ""
       ].filter(Boolean).join(" | ");
     })
@@ -947,7 +986,8 @@ async function findIkasOrder(orderNumber) {
   return data.listOrder?.data?.[0] || null;
 }
 
-function formatProductContext(product) {
+function formatProductContext(product, options = {}) {
+  const includePrice = Boolean(options.includePrice);
   const variants = (product.variants || []).slice(0, 6).map((variant) => {
     const price = variant.prices?.[0] || {};
     const sale = price.discountPrice && price.discountPrice < price.sellPrice
@@ -955,8 +995,8 @@ function formatProductContext(product) {
       : "";
     return [
       `SKU: ${variant.sku || "yok"}`,
-      `fiyat: ${price.sellPrice || "belirsiz"} ${price.currencySymbol || price.currencyCode || ""}`,
-      sale
+      includePrice ? `fiyat: ${price.sellPrice || "belirsiz"} ${price.currencySymbol || price.currencyCode || ""}` : "",
+      includePrice ? sale : ""
     ].filter(Boolean).join(", ");
   }).join(" | ");
 
@@ -970,24 +1010,77 @@ function formatProductContext(product) {
   ].filter(Boolean).join("\n");
 }
 
-function formatProductAnswer(products) {
+function formatProductAnswer(products, options = {}) {
+  const includePrice = Boolean(options.includePrice);
   const visible = products.slice(0, 5);
 
   if (visible.length === 1) {
     const product = visible[0];
     return [
       `${product.name} urununu panelde buldum.`,
-      `Fiyat: ${getProductPriceText(product)}.`,
+      includePrice ? `Fiyat: ${getProductPriceText(product)}.` : "",
       buildProductUrl(product) ? `Urun linki: ${buildProductUrl(product)}` : "",
-      "Bu urun hakkinda hangi bilgiyi merak ediyorsunuz?"
+      includePrice ? "Bu urun hakkinda baska hangi bilgiyi merak ediyorsunuz?" : "Bu urun hakkinda fiyat, materyal, olcu veya kullanim gibi hangi bilgiyi merak ediyorsunuz?"
     ].filter(Boolean).join("\n");
   }
 
   return [
     "Panelde birden fazla eslesen urun buldum:",
-    ...visible.map((product, index) => `${index + 1}. ${product.name} - fiyat: ${getProductPriceText(product)}`),
+    ...visible.map((product, index) => {
+      const link = buildProductUrl(product);
+      const price = includePrice ? ` - fiyat: ${getProductPriceText(product)}` : "";
+      return `${index + 1}. ${product.name}${price}${link ? ` - link: ${link}` : ""}`;
+    }),
     "Hangisini soruyorsunuz? Urun adini biraz daha net yazabilir veya urun linkini gonderebilirsiniz."
   ].join("\n");
+}
+
+function formatProductDetailAnswer(product, message) {
+  const lines = [`${product.name} modeliyle ilgili devam edeyim.`];
+  const description = stripHtml(`${product.shortDescription || ""} ${product.description || ""}`).trim();
+  const material = getProductMaterialText(product);
+  const link = buildProductUrl(product);
+
+  if (isPriceQuestion(message)) {
+    lines.push(`Fiyat: ${getProductPriceText(product)}.`);
+  }
+
+  if (isMaterialQuestion(message)) {
+    lines.push(material || "Panel aciklamasinda bu urun icin net materyal bilgisi gorunmuyor. Urun linkinden ya da destek ekibimizden netlestirebiliriz.");
+  } else if (description) {
+    lines.push(`Panel aciklamasi: ${description.slice(0, 420)}${description.length > 420 ? "..." : ""}`);
+    if (material) lines.push(material);
+  } else if (material) {
+    lines.push(material);
+  } else {
+    lines.push("Panelde bu urun icin detay aciklama sinirli gorunuyor. Isterseniz urun linki uzerinden birlikte netlestirebiliriz.");
+  }
+
+  if (link) lines.push(`Urun linki: ${link}`);
+  return lines.filter(Boolean).join("\n");
+}
+
+function rememberLastProduct(sessionId, product) {
+  if (!sessionId || !product) return;
+  lastProductSessions.set(sessionId, product);
+  if (lastProductSessions.size > 500) {
+    const firstKey = lastProductSessions.keys().next().value;
+    if (firstKey) lastProductSessions.delete(firstKey);
+  }
+}
+
+function getProductMaterialText(product) {
+  const text = normalize(stripHtml(`${product.shortDescription || ""} ${product.description || ""} ${product.name || ""}`));
+  if (/(925|gumus|silver|sterling)/.test(text)) {
+    return "Panel aciklamasinda gumus/925 ayar bilgisini goruyorum.";
+  }
+  if (/(pirinc|brass)/.test(text)) {
+    return "Panel aciklamasinda pirinc materyal bilgisi goruyorum.";
+  }
+  if (/(kaplama|plated|gold plated|altin kaplama)/.test(text)) {
+    return "Panel aciklamasinda kaplama bilgisi geciyor; kesin materyal icin urun sayfasi bilgisini esas almak gerekir.";
+  }
+  return "";
 }
 
 function getProductPriceText(product) {
@@ -1104,8 +1197,31 @@ function isOrderStatusRequest(message) {
 }
 
 function isProductInfoRequest(message, page) {
-  const text = normalize(`${message || ""} ${page?.pageTitle || ""} ${page?.pageUrl || ""}`);
-  return /(urun|kolye|bileklik|yuzuk|kupe|stok|fiyat|beden|olcu|necklace|ring|bracelet|earring)/.test(text);
+  const text = normalize(message);
+  const pageUrl = normalize(page?.pageUrl || "");
+  const asksAboutCurrentProduct = /\/products\//.test(pageUrl)
+    && /(bu|bunun|buradaki|sayfadaki|model|urun|fiyat|ne kadar|kac tl|materyal|malzeme|gumus|kaplama|ozellik|olcu|beden|link|garanti|bakim)/.test(text);
+
+  return /\/products\//.test(text)
+    || /(urun|kolye|bileklik|yuzuk|kupe|fiyat|ucret|ne kadar|kac tl|kaç tl|beden|olcu|materyal|malzeme|gumus|kaplama|ozellik|link|necklace|ring|bracelet|earring)/.test(text)
+    || asksAboutCurrentProduct;
+}
+
+function isPriceQuestion(message) {
+  const text = normalize(message);
+  return /(fiyat|ucret|tutar|ne kadar|kac tl|kaç tl|\btl\b|₺|try)/.test(text);
+}
+
+function isMaterialQuestion(message) {
+  const text = normalize(message);
+  return /(gumus|silver|925|pirinc|brass|materyal|malzeme|kaplama|altin kaplama|celik|kararir|kararma|solar|solma)/.test(text);
+}
+
+function isProductFollowupRequest(message) {
+  const text = normalize(message);
+  return isPriceQuestion(message)
+    || isMaterialQuestion(message)
+    || /(ozellik|detay|olcu|beden|rengi|renk|tas|zincir|uzunluk|agirlik|link|bakim|garanti|suya dayanir|su gecirir|kullanim|ayarlanabilir)/.test(text);
 }
 
 function isGenericProductRequest(message) {
@@ -1137,11 +1253,13 @@ function extractProductSearchTerm(message, page) {
     "bir", "bu", "bunlar", "su", "foto", "fotograf", "gorsel", "mevcut", "satis", "satiliyor", "satista",
     "almak", "istiyorum", "soruyorum", "sorarim", "sorabilir", "hangi",
     "http", "https", "www", "com", "products", "product", "the", "and", "with", "for",
-    "necklace", "ring", "bracelet", "earring", "jewelry", "jewellery", "model"
+    "necklace", "ring", "bracelet", "earring", "jewelry", "jewellery", "model",
+    "nasil", "nasıl", "neden", "evet", "hayir", "hayır", "tamam", "olur", "olmaz", "peki",
+    "tesekkur", "tesekkurler", "saol", "sagol", "yardim", "yardimci"
   ]);
   const words = normalize(source)
     .split(/[^a-z0-9]+/)
-    .filter((word) => word.length > 2 && !ignored.has(word));
+    .filter((word) => word.length > 2 && !ignored.has(word) && !/^\d+$/.test(word));
   return [...new Set(words)].slice(0, 5).join(" ");
 }
 
@@ -1171,7 +1289,7 @@ function recordEvent(event) {
   fs.appendFileSync(EVENTS_PATH, `${JSON.stringify(safeEvent)}\n`, "utf8");
 
   const stats = readStats();
-  const day = createdAt.slice(0, 10);
+  const day = getIstanbulDateKey(createdAt);
   stats.days[day] = stats.days[day] || {
     sessions: {},
     people: {},
@@ -1213,7 +1331,8 @@ function buildOwnerReport() {
   const today = report.today;
 
   return [
-    `${OWNER_NAME} patron raporu:`,
+    `${OWNER_NAME} patron raporu (${report.todayKey}):`,
+    "Bu rapor bugun kaydedilen tum sohbetleri kapsar.",
     `Bugun konusan kisi: ${today.conversationCount}`,
     `Bugun konusulan kisiler: ${Object.values(today.people || {}).join(", ") || "Henuz yok"}`,
     `Bugunku mesaj: ${today.messageCount}`,
@@ -1227,7 +1346,7 @@ function buildOwnerReport() {
 
 function buildReportObject() {
   const stats = readStats();
-  const todayKey = new Date().toISOString().slice(0, 10);
+  const todayKey = getIstanbulDateKey();
   const today = stats.days[todayKey] || {
     conversationCount: 0,
     messageCount: 0,
@@ -1246,12 +1365,25 @@ function buildReportObject() {
   }));
 
   return {
+    todayKey,
     today,
     days,
     totalDays: days.length,
     totalConversations: days.reduce((sum, item) => sum + item.conversationCount, 0),
     totalMessages: days.reduce((sum, item) => sum + item.messageCount, 0)
   };
+}
+
+function getIstanbulDateKey(value) {
+  const date = value ? new Date(value) : new Date();
+  const parts = new Intl.DateTimeFormat("en", {
+    timeZone: "Europe/Istanbul",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).formatToParts(date);
+  const map = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return `${map.year}-${map.month}-${map.day}`;
 }
 
 function isOwnerReportRequest(message) {
