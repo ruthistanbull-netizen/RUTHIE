@@ -4,11 +4,11 @@ const path = require("path");
 
 const PORT = Number(process.env.PORT || 8787);
 const DATA_DIR = process.env.RUTHIE_DATA_DIR || path.join(__dirname, "ruthie-data");
-const OWNER_NAME = process.env.RUTHIE_OWNER_NAME || "Görkem Çirik";
+const OWNER_NAME = process.env.RUTHIE_OWNER_NAME || "Gorkem Cirik";
 const OWNER_SECRET = process.env.RUTHIE_OWNER_SECRET || "";
 const OWNER_SECURITY_ANSWER = process.env.RUTHIE_OWNER_SECURITY_ANSWER || "enes";
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
-const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-5.5";
+const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-5.4-mini";
 const KNOWLEDGE_FILE = process.env.RUTHIE_KNOWLEDGE_FILE || path.join(__dirname, "ruthie-bilgi-bankasi.txt");
 
 const STATS_PATH = path.join(DATA_DIR, "daily-stats.json");
@@ -41,7 +41,7 @@ const server = http.createServer(async (req, res) => {
       if (!String(req.headers["content-type"] || "").includes("application/json")) {
         sendJson(res, {
           handoff: true,
-          message: "Fotoğrafı aldım ama görsel yorumlama bağlantısı bu sürümde kapalı. WhatsApp destek ekibimiz fotoğraf üzerinden hemen yardımcı olabilir."
+          message: "Fotografi aldim ama gorsel yorumlama baglantisi bu surumde kapali. WhatsApp destek ekibimiz fotograf uzerinden hemen yardimci olabilir."
         });
         return;
       }
@@ -59,7 +59,7 @@ const server = http.createServer(async (req, res) => {
 
       if (isOwnerReportRequest(message)) {
         ownerChallenges.add(sessionId);
-        sendJson(res, { message: `${OWNER_NAME}, güvenlik için: En sevdiğiniz hayvan nedir?` });
+        sendJson(res, { message: `${OWNER_NAME}, guvenlik icin: En sevdiginiz hayvan nedir?` });
         return;
       }
 
@@ -106,7 +106,7 @@ const server = http.createServer(async (req, res) => {
   } catch (error) {
     sendJson(res, {
       handoff: true,
-      message: "Ruthie şu anda yanıtı netleştiremedi. WhatsApp destek ekibimiz hemen yardımcı olabilir."
+      message: "Ruthie su anda yaniti netlestiremedi. WhatsApp destek ekibimiz hemen yardimci olabilir."
     }, 200);
   }
 });
@@ -151,18 +151,18 @@ async function answerWithOpenAI({ message, sessionId, visitorName, pageUrl, page
   if (!OPENAI_API_KEY) {
     return {
       handoff: true,
-      message: "Ruthie'nin AI bağlantısı açılmak üzere. Şimdilik WhatsApp destek ekibimiz size yardımcı olabilir."
+      message: "Ruthie'nin AI baglantisi acilmak uzere. Simdilik WhatsApp destek ekibimiz size yardimci olabilir."
     };
   }
 
   const history = conversationMemory.get(sessionId) || [];
   const historyText = history
-    .map((turn) => `Müşteri: ${turn.user}\nRuthie: ${turn.assistant}`)
+    .map((turn) => `Musteri: ${turn.user}\nRuthie: ${turn.assistant}`)
     .join("\n\n");
   const inputText = [
-    `Müşteri adı: ${visitorName || "bilinmiyor"}`,
+    `Musteri adi: ${visitorName || "bilinmiyor"}`,
     `Sayfa: ${pageTitle || ""} ${pageUrl || ""}`.trim(),
-    historyText ? `Son konuşma:\n${historyText}` : "",
+    historyText ? `Son konusma:\n${historyText}` : "",
     `Yeni mesaj: ${message || ""}`
   ].filter(Boolean).join("\n\n");
 
@@ -189,7 +189,7 @@ async function answerWithOpenAI({ message, sessionId, visitorName, pageUrl, page
   const rawText = extractOutputText(data).trim();
   const cleaned = rawText.replace(/^WHATSAPP_YONLENDIR\s*[:\-]?\s*/i, "").trim();
   const handoff = /^WHATSAPP_YONLENDIR/i.test(rawText);
-  const messageText = cleaned || "Bu konu için sizi WhatsApp destek ekibimize yönlendirmem en doğrusu.";
+  const messageText = cleaned || "Bu konu icin sizi WhatsApp destek ekibimize yonlendirmem en dogrusu.";
 
   rememberTurn(sessionId, message, messageText);
 
@@ -201,17 +201,17 @@ async function answerWithOpenAI({ message, sessionId, visitorName, pageUrl, page
 
 function buildAssistantInstructions() {
   return [
-    "Sen RUTH ISTANBUL mağazası için çalışan Ruthie adlı müşteri hizmetleri asistanısın.",
-    "Türkçe konuş. Tonun sıcak, kısa, net ve butik takı markasına uygun zarif olsun.",
-    "Müşteri ürün, sipariş, kargo, iade, değişim, beden/ölçü, stok ve bakım konularında soru sorabilir.",
-    "Kesin bilmediğin fiyat, stok, sipariş durumu, kargo hareketi veya kişisel veri içeren konularda asla uydurma.",
-    "Sipariş durumu sorulursa sipariş numarası ve siparişte kullanılan e-posta/telefon bilgisini iste; canlı mağaza paneli bağlı değilse net durum söyleme.",
-    "Eğer cevap için mağaza paneli, gerçek stok, ödeme, kargo ekranı veya insan desteği gerekiyorsa cevabın başına WHATSAPP_YONLENDIR yaz.",
-    "WHATSAPP_YONLENDIR kullanırsan sonrasında müşteriye neden WhatsApp desteğe yönlendirdiğini tek cümleyle açıkla.",
-    "Ürün önerilerinde nazik ve satış odaklı ol ama abartılı vaat verme.",
-    "Bilgi bankasında olmayan bilgiyi kesinmiş gibi söyleme.",
+    "Sen RUTH ISTANBUL magazasi icin calisan Ruthie adli musteri hizmetleri asistanisin.",
+    "Turkce konus. Tonun sicak, kisa, net ve butik taki markasina uygun zarif olsun.",
+    "Musteri urun, siparis, kargo, iade, degisim, beden/olcu, stok ve bakim konularinda soru sorabilir.",
+    "Kesin bilmedigin fiyat, stok, siparis durumu, kargo hareketi veya kisisel veri iceren konularda asla uydurma.",
+    "Siparis durumu sorulursa siparis numarasi ve sipariste kullanilan e-posta/telefon bilgisini iste; canli magaza paneli bagli degilse net durum soyleme.",
+    "Eger cevap icin magaza paneli, gercek stok, odeme, kargo ekrani veya insan destegi gerekiyorsa cevabin basina WHATSAPP_YONLENDIR yaz.",
+    "WHATSAPP_YONLENDIR kullanirsan sonrasinda musteriye neden WhatsApp destegine yonlendirdigini tek cumleyle acikla.",
+    "Urun onerilerinde nazik ve satis odakli ol ama abartili vaat verme.",
+    "Bilgi bankasinda olmayan bilgiyi kesinmis gibi soyleme.",
     "",
-    "RUTHIE BİLGİ BANKASI:",
+    "RUTHIE BILGI BANKASI:",
     readKnowledge()
   ].join("\n");
 }
@@ -222,10 +222,10 @@ function readKnowledge() {
   } catch (error) {
     return [
       "Marka: RUTH ISTANBUL",
-      "Alan: handmade jewelry / takı",
+      "Alan: handmade jewelry / taki",
       "WhatsApp destek: 908503469789",
-      "Asistan emin olmadığı her konuda WhatsApp desteğe yönlendirir.",
-      "Mağaza paneli ve canlı sipariş/ürün stok bağlantısı henüz eklenmedi."
+      "Asistan emin olmadigi her konuda WhatsApp destegine yonlendirir.",
+      "Magaza paneli ve canli siparis/urun stok baglantisi henuz eklenmedi."
     ].join("\n");
   }
 }
@@ -279,7 +279,7 @@ function recordEvent(event) {
   }
 
   dayStats.people = dayStats.people || {};
-  dayStats.people[safeEvent.sessionId] = visitorName || "Anonim ziyaretçi";
+  dayStats.people[safeEvent.sessionId] = visitorName || "Anonim ziyaretci";
   if (safeEvent.type === "message_sent") dayStats.messageCount += 1;
   if (safeEvent.type === "image_attached") dayStats.imageCount += 1;
   dayStats.lastMessageAt = createdAt;
@@ -305,14 +305,14 @@ function buildOwnerReport() {
 
   return [
     `${OWNER_NAME} patron raporu:`,
-    `Bugün konuşan kişi: ${today.conversationCount}`,
-    `Bugün konuşulan kişiler: ${Object.values(today.people || {}).join(", ") || "Henüz yok"}`,
-    `Bugünkü mesaj: ${today.messageCount}`,
-    `Bugünkü fotoğraf: ${today.imageCount || 0}`,
-    `Toplam kayıtlı gün: ${report.totalDays}`,
-    `Toplam görüşme: ${report.totalConversations}`,
+    `Bugun konusan kisi: ${today.conversationCount}`,
+    `Bugun konusulan kisiler: ${Object.values(today.people || {}).join(", ") || "Henuz yok"}`,
+    `Bugunku mesaj: ${today.messageCount}`,
+    `Bugunku fotograf: ${today.imageCount || 0}`,
+    `Toplam kayitli gun: ${report.totalDays}`,
+    `Toplam gorusme: ${report.totalConversations}`,
     `Toplam mesaj: ${report.totalMessages}`,
-    `Son görüşme zamanı: ${today.lastMessageAt || "Henüz yok"}`
+    `Son gorusme zamani: ${today.lastMessageAt || "Henuz yok"}`
   ].join("\n");
 }
 
@@ -363,12 +363,12 @@ function normalize(value) {
     .toLocaleLowerCase("tr")
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "")
-    .replace(/ç/g, "c")
-    .replace(/ğ/g, "g")
-    .replace(/ı/g, "i")
-    .replace(/ö/g, "o")
-    .replace(/ş/g, "s")
-    .replace(/ü/g, "u");
+    .replace(/\u00e7/g, "c")
+    .replace(/\u011f/g, "g")
+    .replace(/\u0131/g, "i")
+    .replace(/\u00f6/g, "o")
+    .replace(/\u015f/g, "s")
+    .replace(/\u00fc/g, "u");
 }
 
 function createSessionId() {
