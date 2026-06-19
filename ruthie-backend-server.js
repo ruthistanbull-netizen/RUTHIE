@@ -9,6 +9,8 @@ const OWNER_SECRET = process.env.RUTHIE_OWNER_SECRET || "";
 const OWNER_SECURITY_ANSWER = process.env.RUTHIE_OWNER_SECURITY_ANSWER || "enes";
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-5-mini";
+const OPENAI_VISION_MODEL = process.env.OPENAI_VISION_MODEL || OPENAI_MODEL;
+const MAX_IMAGE_UPLOAD_BYTES = Number(process.env.RUTHIE_MAX_IMAGE_UPLOAD_BYTES || 6_000_000);
 const KNOWLEDGE_FILE = process.env.RUTHIE_KNOWLEDGE_FILE || path.join(__dirname, "ruthie-bilgi-bankasi.txt");
 const IKAS_STORE_DOMAIN = process.env.IKAS_STORE_DOMAIN || "";
 const IKAS_CLIENT_ID = process.env.IKAS_CLIENT_ID || "";
@@ -19,6 +21,8 @@ const STATS_PATH = path.join(DATA_DIR, "daily-stats.json");
 const EVENTS_PATH = path.join(DATA_DIR, "conversation-events.jsonl");
 const ownerChallenges = new Set();
 const conversationMemory = new Map();
+const pendingOrderSessions = new Set();
+const pendingProductSessions = new Set();
 let ikasTokenCache = { token: "", expiresAt: 0 };
 
 fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -43,15 +47,25 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === "POST" && req.url === "/api/chat") {
-      if (!String(req.headers["content-type"] || "").includes("application/json")) {
+      const contentType = String(req.headers["content-type"] || "");
+      let body = {};
+      let imageFile = null;
+
+      if (contentType.includes("application/json")) {
+        body = await readJson(req);
+      } else if (contentType.includes("multipart/form-data")) {
+        const multipart = await readMultipart(req);
+        body = multipart.fields;
+        imageFile = multipart.files.find((file) => file.fieldName === "image")
+          || multipart.files.find((file) => /^image\//i.test(file.contentType));
+      } else {
         sendJson(res, {
           handoff: true,
-          message: "Fotografi aldim ama gorsel yorumlama baglantisi bu surumde kapali. WhatsApp destek ekibimiz fotograf uzerinden hemen yardimci olabilir."
+          message: "Mesajinizi alamadim. Lutfen tekrar yazar misiniz?"
         });
         return;
       }
 
-      const body = await readJson(req);
       const message = String(body.message || "").trim();
       const sessionId = String(body.sessionId || createSessionId());
       const visitorName = String(body.visitorName || body.customerName || "").trim();
@@ -78,12 +92,34 @@ const server = http.createServer(async (req, res) => {
         createdAt: new Date().toISOString()
       });
 
+      if (imageFile) {
+        const imageReply = await answerImageWithOpenAI({
+          message,
+          imageFile,
+          sessionId,
+          visitorName,
+          pageUrl: body.pageUrl || "",
+          pageTitle: body.pageTitle || ""
+        });
+        sendJson(res, imageReply);
+        return;
+      }
+
       const panelReply = await answerFromIkasPanelIfPossible(message, {
         pageUrl: body.pageUrl || "",
         pageTitle: body.pageTitle || ""
-      });
+      }, sessionId);
       if (panelReply) {
         sendJson(res, panelReply);
+        return;
+      }
+
+      const productPanelReply = await answerProductFromIkasPanelIfPossible(message, {
+        pageUrl: body.pageUrl || "",
+        pageTitle: body.pageTitle || ""
+      }, sessionId);
+      if (productPanelReply) {
+        sendJson(res, productPanelReply);
         return;
       }
 
@@ -117,12 +153,25 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    if (req.method === "GET" && req.url.startsWith("/api/ikas/test")) {
+      const url = new URL(req.url, `http://${req.headers.host}`);
+      const code = url.searchParams.get("code") || "";
+      if (!OWNER_SECRET || code !== OWNER_SECRET) {
+        sendJson(res, { ok: false, error: "unauthorized" }, 401);
+        return;
+      }
+
+      sendJson(res, await buildIkasTestReport(url.searchParams.get("orderNumber") || ""));
+      return;
+    }
+
     sendJson(res, {
       ok: true,
       service: "Ruthie backend is running",
       assistantReady: Boolean(OPENAI_API_KEY),
       ikasReady: isIkasConfigured(),
-      model: OPENAI_MODEL
+      model: OPENAI_MODEL,
+      visionModel: OPENAI_VISION_MODEL
     });
   } catch (error) {
     console.error("Ruthie request error:", error && error.message ? error.message : error);
@@ -169,6 +218,78 @@ function readJson(req) {
   });
 }
 
+function readRaw(req, limit = MAX_IMAGE_UPLOAD_BYTES + 500_000) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let total = 0;
+
+    req.on("data", (chunk) => {
+      total += chunk.length;
+      if (total > limit) {
+        reject(new Error("body_too_large"));
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+
+    req.on("end", () => resolve(Buffer.concat(chunks)));
+    req.on("error", reject);
+  });
+}
+
+async function readMultipart(req) {
+  const contentType = String(req.headers["content-type"] || "");
+  const boundaryMatch = contentType.match(/boundary=(?:"([^"]+)"|([^;]+))/i);
+  const boundary = (boundaryMatch?.[1] || boundaryMatch?.[2] || "").trim();
+  if (!boundary) throw new Error("multipart_boundary_missing");
+
+  const body = await readRaw(req);
+  const raw = body.toString("latin1");
+  const parts = raw.split(`--${boundary}`).slice(1, -1);
+  const fields = {};
+  const files = [];
+
+  for (let part of parts) {
+    if (part.startsWith("\r\n")) part = part.slice(2);
+    if (part.endsWith("\r\n")) part = part.slice(0, -2);
+    if (part.endsWith("--")) part = part.slice(0, -2);
+
+    const separator = part.indexOf("\r\n\r\n");
+    if (separator === -1) continue;
+
+    const headerText = part.slice(0, separator);
+    let valueText = part.slice(separator + 4);
+    if (valueText.endsWith("\r\n")) valueText = valueText.slice(0, -2);
+
+    const headers = {};
+    for (const line of headerText.split("\r\n")) {
+      const index = line.indexOf(":");
+      if (index === -1) continue;
+      headers[line.slice(0, index).trim().toLowerCase()] = line.slice(index + 1).trim();
+    }
+
+    const disposition = headers["content-disposition"] || "";
+    const name = disposition.match(/name="([^"]+)"/)?.[1] || "";
+    const filename = disposition.match(/filename="([^"]*)"/)?.[1] || "";
+    if (!name) continue;
+
+    const buffer = Buffer.from(valueText, "latin1");
+    if (filename) {
+      files.push({
+        fieldName: name,
+        filename,
+        contentType: headers["content-type"] || "application/octet-stream",
+        buffer
+      });
+    } else {
+      fields[name] = buffer.toString("utf8");
+    }
+  }
+
+  return { fields, files };
+}
+
 async function answerWithOpenAI({ message, sessionId, visitorName, pageUrl, pageTitle, liveContext }) {
   if (!OPENAI_API_KEY) {
     return {
@@ -213,7 +334,7 @@ async function answerWithOpenAI({ message, sessionId, visitorName, pageUrl, page
   const rawText = extractOutputText(data).trim();
   const cleaned = rawText.replace(/^WHATSAPP_YONLENDIR\s*[:\-]?\s*/i, "").trim();
   const handoff = /^WHATSAPP_YONLENDIR/i.test(rawText);
-  const messageText = cleaned || "Bu konu icin sizi WhatsApp destek ekibimize yonlendirmem en dogrusu.";
+  const messageText = sanitizeCustomerMessage(cleaned || "Bu konu icin sizi WhatsApp destek ekibimize yonlendirmem en dogrusu.");
 
   rememberTurn(sessionId, message, messageText);
 
@@ -223,16 +344,94 @@ async function answerWithOpenAI({ message, sessionId, visitorName, pageUrl, page
   };
 }
 
+async function answerImageWithOpenAI({ message, imageFile, sessionId, visitorName, pageUrl, pageTitle }) {
+  if (!OPENAI_API_KEY) {
+    return {
+      handoff: true,
+      message: "Fotografi aldim. AI gorsel yorumu acilmak uzere; WhatsApp destek ekibimiz fotograf uzerinden hemen yardimci olabilir."
+    };
+  }
+
+  if (!imageFile || !imageFile.buffer || imageFile.buffer.length === 0) {
+    return { message: "Fotografi alamadim. Lutfen tekrar yukler misiniz?" };
+  }
+
+  if (imageFile.buffer.length > MAX_IMAGE_UPLOAD_BYTES) {
+    return { message: "Fotograf biraz buyuk geldi. Daha dusuk boyutlu bir fotograf yukleyebilir misiniz?" };
+  }
+
+  if (!/^image\/(png|jpe?g|webp|gif)$/i.test(imageFile.contentType || "")) {
+    return { message: "Bu dosya fotograf gibi gorunmuyor. PNG, JPG veya WEBP olarak tekrar gonderebilir misiniz?" };
+  }
+
+  const prompt = [
+    "Musterinin gonderdigi fotografi yorumla.",
+    "RUTH ISTANBUL handmade taki markasi icin Ruthie adli musteri hizmetleri asistanisin.",
+    "Turkce, sicak, kisa ve zarif cevap ver.",
+    "Gorseldeki taki tarzi, renk, model benzerligi, kombin onerisi veya bakim sorusu icin yardimci ol.",
+    "Kesin urun eslestirmesi yapamiyorsan emin olmadigini soyle ve urun adi ya da urun linki iste.",
+    "Musteriye hicbir durumda stok, adet, kalan urun veya var/yok bilgisi verme.",
+    `Musteri adi: ${visitorName || "bilinmiyor"}`,
+    `Sayfa: ${pageTitle || ""} ${pageUrl || ""}`.trim(),
+    `Musteri mesaji: ${message || "Fotograf gonderdi."}`
+  ].filter(Boolean).join("\n");
+
+  try {
+    const response = await fetch("https://api.openai.com/v1/responses", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${OPENAI_API_KEY}`
+      },
+      body: JSON.stringify({
+        model: OPENAI_VISION_MODEL,
+        reasoning: { effort: "low" },
+        text: { verbosity: "low" },
+        input: [
+          {
+            role: "user",
+            content: [
+              { type: "input_text", text: prompt },
+              {
+                type: "input_image",
+                image_url: `data:${imageFile.contentType};base64,${imageFile.buffer.toString("base64")}`
+              }
+            ]
+          }
+        ]
+      })
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text().catch(() => "");
+      throw new Error(`openai_image_error_${response.status}: ${errorText.slice(0, 300)}`);
+    }
+
+    const data = await response.json();
+    const messageText = sanitizeCustomerMessage(extractOutputText(data).trim() || "Fotografi aldim. Bu urun icin urun adini ya da linkini paylasirsaniz daha net yardimci olabilirim.");
+    rememberTurn(sessionId, message || "[fotograf]", messageText);
+
+    return { message: messageText.slice(0, 1200) };
+  } catch (error) {
+    console.error("OpenAI image analysis error:", error && error.message ? error.message : error);
+    return {
+      handoff: true,
+      message: "Fotografi aldim fakat su an net yorumlayamadim. WhatsApp destek ekibimiz fotograf uzerinden hemen yardimci olabilir."
+    };
+  }
+}
+
 function buildAssistantInstructions() {
   return [
     "Sen RUTH ISTANBUL magazasi icin calisan Ruthie adli musteri hizmetleri asistanisin.",
     "Turkce konus. Tonun sicak, kisa, net ve butik taki markasina uygun zarif olsun.",
-    "Musteri urun, siparis, kargo, iade, degisim, beden/olcu, stok ve bakim konularinda soru sorabilir.",
-    "Kesin bilmedigin fiyat, stok, siparis durumu, kargo hareketi veya kisisel veri iceren konularda asla uydurma.",
+    "Musteri urun, siparis, kargo, iade, degisim, beden/olcu ve bakim konularinda soru sorabilir.",
+    "Kesin bilmedigin fiyat, siparis durumu, kargo hareketi veya kisisel veri iceren konularda asla uydurma.",
+    "Musteriye hicbir durumda stok, adet, kalan urun veya var/yok bilgisi verme; bu tip sorularda urun adi ya da urun linki iste.",
     "Siparis durumu sorulursa siparis numarasi ve sipariste kullanilan e-posta/telefon bilgisini iste; canli magaza paneli bagli degilse net durum soyleme.",
-    "IKAS CANLI PANEL VERILERI basligi gelirse urun, stok, fiyat ve siparis cevaplarinda bu verileri oncelikli kullan.",
-    "IKAS verisinde olmayan stok, fiyat, kargo takip veya siparis detayini uydurma.",
-    "Eger cevap icin magaza paneli, gercek stok, odeme, kargo ekrani veya insan destegi gerekiyorsa cevabin basina WHATSAPP_YONLENDIR yaz.",
+    "IKAS CANLI PANEL VERILERI basligi gelirse urun, fiyat ve siparis cevaplarinda bu verileri oncelikli kullan.",
+    "IKAS verisinde olmayan fiyat, kargo takip veya siparis detayini uydurma.",
+    "Eger cevap icin magaza paneli, odeme, kargo ekrani veya insan destegi gerekiyorsa cevabin basina WHATSAPP_YONLENDIR yaz.",
     "WHATSAPP_YONLENDIR kullanirsan sonrasinda musteriye neden WhatsApp destegine yonlendirdigini tek cumleyle acikla.",
     "Urun onerilerinde nazik ve satis odakli ol ama abartili vaat verme.",
     "Bilgi bankasinda olmayan bilgiyi kesinmis gibi soyleme.",
@@ -251,7 +450,7 @@ function readKnowledge() {
       "Alan: handmade jewelry / taki",
       "WhatsApp destek: 908503469789",
       "Asistan emin olmadigi her konuda WhatsApp destegine yonlendirir.",
-      "Magaza paneli ve canli siparis/urun stok baglantisi henuz eklenmedi."
+      "Magaza paneli ve canli siparis/urun baglantisi henuz eklenmedi."
     ].join("\n");
   }
 }
@@ -273,12 +472,34 @@ function rememberTurn(sessionId, userText, assistantText) {
   conversationMemory.set(sessionId, history.slice(-8));
 }
 
-async function answerFromIkasPanelIfPossible(message, page) {
-  if (!isIkasConfigured() || !isOrderStatusRequest(message)) return null;
+function sanitizeCustomerMessage(value) {
+  return String(value || "")
+    .replace(/\bstok[a-z]*/gi, "urun uygunlugu")
+    .replace(/\bsto\u011f[a-z]*/gi, "urun uygunlugu")
+    .replace(/\bstock[a-z]*/gi, "product availability")
+    .replace(/[ \t]+/g, " ")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
 
+async function answerFromIkasPanelIfPossible(message, page, sessionId) {
   const orderNumber = extractOrderNumber(message);
   const contact = extractCustomerContact(message);
-  if (!orderNumber || !contact) {
+  const hasContact = Boolean(contact.email || contact.phone);
+  const looksLikeOrderDetails = Boolean(orderNumber && hasContact);
+  const shouldHandleOrder = isOrderStatusRequest(message) || pendingOrderSessions.has(sessionId) || looksLikeOrderDetails;
+
+  if (!shouldHandleOrder) return null;
+
+  if (!isIkasConfigured()) {
+    return {
+      handoff: true,
+      message: "Siparis paneli baglantisi henuz hazir gorunmuyor. WhatsApp destek ekibimiz siparisinizi hemen kontrol edebilir."
+    };
+  }
+
+  if (!orderNumber || !hasContact) {
+    pendingOrderSessions.add(sessionId);
     return {
       message: "Siparisinizi kontrol edebilmem icin siparis numaranizi ve sipariste kullandiginiz e-posta ya da telefon bilgisini birlikte yazar misiniz?"
     };
@@ -287,6 +508,7 @@ async function answerFromIkasPanelIfPossible(message, page) {
   try {
     const order = await findIkasOrder(orderNumber);
     if (!order) {
+      pendingOrderSessions.add(sessionId);
       return {
         handoff: true,
         message: "Bu siparis numarasini panelde net bulamadim. Bilgilerinizi birlikte kontrol etmek icin sizi WhatsApp destegimize yonlendiriyorum."
@@ -294,18 +516,64 @@ async function answerFromIkasPanelIfPossible(message, page) {
     }
 
     if (!doesContactMatchOrder(contact, order)) {
+      pendingOrderSessions.add(sessionId);
       return {
         message: "Guvenlik icin sipariste kullanilan e-posta ya da telefon bilgisi eslesmedi. Lutfen siparis numarasi ile birlikte dogru e-posta/telefon bilgisini yazar misiniz?"
       };
     }
 
+    pendingOrderSessions.delete(sessionId);
     return {
       message: formatOrderStatus(order)
     };
   } catch (error) {
+    console.error("Ikas order lookup error:", error && error.message ? error.message : error);
+    pendingOrderSessions.add(sessionId);
     return {
       handoff: true,
       message: "Siparis paneline su an ulasamadim. WhatsApp destek ekibimiz siparisinizi hemen kontrol edebilir."
+    };
+  }
+}
+
+async function answerProductFromIkasPanelIfPossible(message, page, sessionId) {
+  const shouldHandleProduct = isProductInfoRequest(message, page) || pendingProductSessions.has(sessionId);
+  if (!shouldHandleProduct) return null;
+
+  if (!isIkasConfigured()) {
+    return {
+      handoff: true,
+      message: "Urun paneli baglantisi henuz hazir gorunmuyor. WhatsApp destek ekibimiz urun bilgisini hemen kontrol edebilir."
+    };
+  }
+
+  const term = extractProductSearchTerm(message, page);
+  if (!term || isGenericProductRequest(message)) {
+    pendingProductSessions.add(sessionId);
+    return {
+      message: "Hangi urunu sormak istiyorsunuz? Urun adini veya urun linkini yazarsaniz panelden kontrol edebilirim."
+    };
+  }
+
+  try {
+    const products = await findIkasProducts(term);
+    if (!products.length) {
+      pendingProductSessions.add(sessionId);
+      return {
+        message: "Panelde bu isimle net bir urun bulamadim. Urun adini biraz daha tam yazabilir veya urun linkini gonderebilir misiniz?"
+      };
+    }
+
+    pendingProductSessions.delete(sessionId);
+    return {
+      message: formatProductAnswer(products)
+    };
+  } catch (error) {
+    console.error("Ikas product lookup error:", error && error.message ? error.message : error);
+    pendingProductSessions.add(sessionId);
+    return {
+      handoff: true,
+      message: "Urun paneline su an ulasamadim. WhatsApp destek ekibimiz urun bilgisini hemen kontrol edebilir."
     };
   }
 }
@@ -319,7 +587,54 @@ async function buildIkasLiveContext(message, page) {
 
     return products.map((product) => formatProductContext(product)).join("\n---\n").slice(0, 10000);
   } catch (error) {
-    return "Ikas panelinden urun bilgisi alinamadi; kesin stok/fiyat bilgisi verme.";
+    console.error("Ikas live product context error:", error && error.message ? error.message : error);
+    return "Ikas panelinden urun bilgisi alinamadi; kesin fiyat bilgisi verme.";
+  }
+}
+
+async function buildIkasTestReport(orderNumber) {
+  const report = {
+    ok: false,
+    ikasConfigured: isIkasConfigured(),
+    tokenOk: false,
+    productOk: false,
+    productCount: 0,
+    sampleProducts: [],
+    orderOk: null,
+    orderNumber: orderNumber || "",
+    error: ""
+  };
+
+  try {
+    await getIkasAccessToken();
+    report.tokenOk = true;
+
+    const products = await findIkasProducts("");
+    report.productOk = true;
+    report.productCount = products.length;
+    report.sampleProducts = products.slice(0, 5).map((product) => ({
+      name: product.name,
+      price: getProductPriceText(product)
+    }));
+
+    if (orderNumber) {
+      const order = await findIkasOrder(orderNumber);
+      report.orderOk = Boolean(order);
+      if (order) {
+        report.order = {
+          orderNumber: order.orderNumber,
+          status: order.status,
+          paymentStatus: order.orderPaymentStatus,
+          packageStatus: order.orderPackageStatus
+        };
+      }
+    }
+
+    report.ok = report.ikasConfigured && report.tokenOk && report.productOk;
+    return report;
+  } catch (error) {
+    report.error = error && error.message ? error.message : String(error);
+    return report;
   }
 }
 
@@ -366,7 +681,7 @@ async function ikasGraphql(query, variables = {}) {
 
   const data = await response.json();
   if (!response.ok || data.errors) {
-    throw new Error(`ikas_graphql_${response.status}`);
+    throw new Error(`ikas_graphql_${response.status}: ${JSON.stringify(data.errors || data).slice(0, 500)}`);
   }
   return data.data || {};
 }
@@ -386,20 +701,14 @@ async function findIkasProducts(term) {
           name
           shortDescription
           description
-          totalStock
           variants {
             id
             sku
-            isActive
-            sellIfOutOfStock
             prices {
               sellPrice
               discountPrice
               currencyCode
               currencySymbol
-            }
-            stocks {
-              stockCount
             }
           }
         }
@@ -413,20 +722,14 @@ async function findIkasProducts(term) {
           name
           shortDescription
           description
-          totalStock
           variants {
             id
             sku
-            isActive
-            sellIfOutOfStock
             prices {
               sellPrice
               discountPrice
               currencyCode
               currencySymbol
-            }
-            stocks {
-              stockCount
             }
           }
         }
@@ -446,20 +749,14 @@ async function findIkasProducts(term) {
             name
             shortDescription
             description
-            totalStock
             variants {
               id
               sku
-              isActive
-              sellIfOutOfStock
               prices {
                 sellPrice
                 discountPrice
                 currencyCode
                 currencySymbol
-              }
-              stocks {
-                stockCount
               }
             }
           }
@@ -525,16 +822,11 @@ async function findIkasOrder(orderNumber) {
 function formatProductContext(product) {
   const variants = (product.variants || []).slice(0, 6).map((variant) => {
     const price = variant.prices?.[0] || {};
-    const stock = typeof product.totalStock === "number"
-      ? product.totalStock
-      : (variant.stocks || []).reduce((sum, item) => sum + Number(item.stockCount || 0), 0);
     const sale = price.discountPrice && price.discountPrice < price.sellPrice
       ? `${price.discountPrice} ${price.currencySymbol || price.currencyCode || ""} indirimli`
       : "";
     return [
       `SKU: ${variant.sku || "yok"}`,
-      `aktif: ${variant.isActive ? "evet" : "hayir"}`,
-      `stok: ${stock}`,
       `fiyat: ${price.sellPrice || "belirsiz"} ${price.currencySymbol || price.currencyCode || ""}`,
       sale
     ].filter(Boolean).join(", ");
@@ -545,10 +837,40 @@ function formatProductContext(product) {
     `Urun: ${product.name}`,
     product.shortDescription ? `Kisa aciklama: ${stripHtml(product.shortDescription)}` : "",
     product.description ? `Aciklama: ${stripHtml(product.description).slice(0, 700)}` : "",
-    `Toplam stok: ${typeof product.totalStock === "number" ? product.totalStock : "belirsiz"}`,
     variants ? `Varyantlar: ${variants}` : "",
     productUrl ? `Link: ${productUrl}` : ""
   ].filter(Boolean).join("\n");
+}
+
+function formatProductAnswer(products) {
+  const visible = products.slice(0, 5);
+
+  if (visible.length === 1) {
+    const product = visible[0];
+    return [
+      `${product.name} urununu panelde buldum.`,
+      `Fiyat: ${getProductPriceText(product)}.`,
+      buildProductUrl(product) ? `Urun linki: ${buildProductUrl(product)}` : "",
+      "Bu urun hakkinda hangi bilgiyi merak ediyorsunuz?"
+    ].filter(Boolean).join("\n");
+  }
+
+  return [
+    "Panelde birden fazla eslesen urun buldum:",
+    ...visible.map((product, index) => `${index + 1}. ${product.name} - fiyat: ${getProductPriceText(product)}`),
+    "Hangisini soruyorsunuz? Urun adini biraz daha net yazabilir veya urun linkini gonderebilirsiniz."
+  ].join("\n");
+}
+
+function getProductPriceText(product) {
+  const prices = (product.variants || []).flatMap((variant) => variant.prices || []);
+  const price = prices.find((item) => typeof item.sellPrice === "number") || prices[0];
+  if (!price) return "belirsiz";
+  const currency = price.currencySymbol || price.currencyCode || price.currency || "TL";
+  if (price.discountPrice && price.discountPrice < price.sellPrice) {
+    return `${price.discountPrice} ${currency} indirimli, normal ${price.sellPrice} ${currency}`;
+  }
+  return `${price.sellPrice} ${currency}`;
 }
 
 function buildProductUrl(product) {
@@ -613,16 +935,21 @@ function doesContactMatchOrder(contact, order) {
 }
 
 function isOrderStatusRequest(message) {
-  return /(siparis|sipariÅŸ|kargo|takip|nerede|durum|order)/i.test(message);
+  return /(siparis|kargo|takip|nerede|durum|order)/.test(normalize(message));
 }
 
 function isProductInfoRequest(message, page) {
-  const text = `${message || ""} ${page?.pageTitle || ""} ${page?.pageUrl || ""}`;
-  return /(urun|Ã¼rÃ¼n|kolye|bileklik|yuzuk|yÃ¼zÃ¼k|kupe|kÃ¼pe|stok|fiyat|beden|olcu|Ã¶lÃ§Ã¼|necklace|ring|bracelet|earring)/i.test(text);
+  const text = normalize(`${message || ""} ${page?.pageTitle || ""} ${page?.pageUrl || ""}`);
+  return /(urun|kolye|bileklik|yuzuk|kupe|stok|fiyat|beden|olcu|necklace|ring|bracelet|earring)/.test(text);
+}
+
+function isGenericProductRequest(message) {
+  const text = normalize(message);
+  return /bir urun hakkinda bilgi almak istiyorum|urun hakkinda bilgi|urun sorusu|urun bilgisi|urun bakmak/.test(text);
 }
 
 function extractOrderNumber(message) {
-  const direct = String(message || "").match(/(?:siparis|sipariÅŸ|order|no|numara|#)\D*(\d{3,10})/i);
+  const direct = normalize(message).match(/(?:siparis|order|no|numara|#)\D*(\d{3,10})/i);
   if (direct) return direct[1];
   const loose = String(message || "").match(/\b\d{4,8}\b/);
   return loose ? loose[0] : "";
@@ -638,8 +965,9 @@ function extractCustomerContact(message) {
 function extractProductSearchTerm(message, page) {
   const source = `${message || ""} ${page?.pageTitle || ""}`;
   const ignored = new Set([
-    "urun", "Ã¼rÃ¼n", "hakkinda", "hakkÄ±nda", "bilgi", "stok", "fiyat", "var", "mi", "mÄ±", "mu", "mÃ¼",
-    "nedir", "kac", "kaÃ§", "tl", "ruth", "istanbul", "kolye", "yuzuk", "yÃ¼zÃ¼k", "bileklik", "kupe", "kÃ¼pe"
+    "urun", "hakkinda", "bilgi", "stok", "fiyat", "var", "mi", "mu",
+    "nedir", "kac", "tl", "ruth", "istanbul", "kolye", "yuzuk", "bileklik", "kupe",
+    "bir", "almak", "istiyorum", "soruyorum", "sorarim", "sorabilir", "hangi"
   ]);
   const words = normalize(source)
     .split(/[^a-z0-9]+/)
