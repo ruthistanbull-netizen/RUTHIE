@@ -21,6 +21,7 @@ const STATS_PATH = path.join(DATA_DIR, "daily-stats.json");
 const EVENTS_PATH = path.join(DATA_DIR, "conversation-events.jsonl");
 const ownerChallenges = new Set();
 const conversationMemory = new Map();
+const recentImageSessions = new Map();
 const pendingOrderSessions = new Set();
 const pendingProductSessions = new Set();
 let ikasTokenCache = { token: "", expiresAt: 0 };
@@ -76,9 +77,9 @@ const server = http.createServer(async (req, res) => {
         return;
       }
 
-      if (isOwnerReportRequest(message)) {
+      if (isOwnerIdentityRequest(message) || isOwnerReportRequest(message)) {
         ownerChallenges.add(sessionId);
-        sendJson(res, { message: `${OWNER_NAME}, guvenlik icin: En sevdiginiz hayvan nedir?` });
+        sendJson(res, { message: `${OWNER_NAME}, güvenlik için: En sevdiğiniz hayvan nedir?` });
         return;
       }
 
@@ -102,6 +103,12 @@ const server = http.createServer(async (req, res) => {
           pageTitle: body.pageTitle || ""
         });
         sendJson(res, imageReply);
+        return;
+      }
+
+      const availabilityReply = answerAvailabilityQuestionIfNeeded(message, sessionId);
+      if (availabilityReply) {
+        sendJson(res, availabilityReply);
         return;
       }
 
@@ -364,6 +371,17 @@ async function answerImageWithOpenAI({ message, imageFile, sessionId, visitorNam
     return { message: "Bu dosya fotograf gibi gorunmuyor. PNG, JPG veya WEBP olarak tekrar gonderebilir misiniz?" };
   }
 
+  if (isAvailabilityQuestion(message)) {
+    const messageText = [
+      "Fotoğrafı aldım.",
+      "Ürün uygunluğu veya kalan adet bilgisi paylaşamıyorum.",
+      "Ürün adını ya da ürün linkini yazarsanız panelden ürün bilgilerini kontrol edip fiyat/link konusunda yardımcı olabilirim."
+    ].join("\n");
+    rememberImageContext(sessionId, messageText);
+    rememberTurn(sessionId, message || "[fotograf]", messageText);
+    return { message: messageText };
+  }
+
   const prompt = [
     "Musterinin gonderdigi fotografi yorumla.",
     "RUTH ISTANBUL handmade taki markasi icin Ruthie adli musteri hizmetleri asistanisin.",
@@ -408,7 +426,8 @@ async function answerImageWithOpenAI({ message, imageFile, sessionId, visitorNam
     }
 
     const data = await response.json();
-    const messageText = sanitizeCustomerMessage(extractOutputText(data).trim() || "Fotografi aldim. Bu urun icin urun adini ya da linkini paylasirsaniz daha net yardimci olabilirim.");
+    const messageText = sanitizeCustomerMessage(extractOutputText(data).trim() || "Fotoğrafı aldım. Bu ürün için ürün adını ya da linkini paylaşırsanız daha net yardımcı olabilirim.");
+    rememberImageContext(sessionId, messageText);
     rememberTurn(sessionId, message || "[fotograf]", messageText);
 
     return { message: messageText.slice(0, 1200) };
@@ -470,6 +489,53 @@ function rememberTurn(sessionId, userText, assistantText) {
   const history = conversationMemory.get(sessionId) || [];
   history.push({ user: userText || "", assistant: assistantText || "" });
   conversationMemory.set(sessionId, history.slice(-8));
+}
+
+function rememberImageContext(sessionId, text) {
+  recentImageSessions.set(sessionId, {
+    text: String(text || "").slice(0, 800),
+    createdAt: Date.now()
+  });
+}
+
+function getRecentImageContext(sessionId) {
+  const item = recentImageSessions.get(sessionId);
+  if (!item) return null;
+  if (Date.now() - item.createdAt > 30 * 60 * 1000) {
+    recentImageSessions.delete(sessionId);
+    return null;
+  }
+  return item;
+}
+
+function answerAvailabilityQuestionIfNeeded(message, sessionId) {
+  const text = normalize(message);
+  if (!isAvailabilityQuestion(message)) {
+    return null;
+  }
+
+  const genericReference = /\b(bu|bunlar|su|foto|fotograf|gorsel|urunler|urun)\b/.test(text);
+  const term = extractProductSearchTerm(message, {});
+  const imageContext = getRecentImageContext(sessionId);
+  const onlyGenericTerm = !term || /^(urun|urunler|varmi|var|bunlar|foto|fotograf|gorsel)(\s|$)/.test(term);
+
+  if (genericReference || imageContext || onlyGenericTerm) {
+    pendingProductSessions.add(sessionId);
+    return {
+      message: [
+        imageContext ? "Fotoğraftaki ürünü/ürünleri gördüm." : "Hangi ürünü sorduğunuzu netleştireyim.",
+        "Ürün uygunluğu veya kalan adet bilgisi paylaşamıyorum.",
+        "Ürün adını ya da ürün linkini yazarsanız panelden ürün bilgilerini kontrol edip fiyat/link konusunda yardımcı olabilirim."
+      ].join("\n")
+    };
+  }
+
+  return null;
+}
+
+function isAvailabilityQuestion(message) {
+  const text = normalize(message);
+  return /(var\s*mi|varmi|var m[iı]|mevcut|bulunuyor|satis|satiliyor|satista|alabilir miyim|urunler var)/.test(text);
 }
 
 function sanitizeCustomerMessage(value) {
@@ -885,7 +951,7 @@ function buildProductUrl(product) {
 
 function formatOrderStatus(order) {
   const items = (order.orderLineItems || [])
-    .map((item) => `${item.variant?.name || "Urun"} x ${item.quantity || 1}`)
+    .map((item) => `${item.variant?.name || "Ürün"} x ${item.quantity || 1}`)
     .slice(0, 4)
     .join(", ");
   const tracking = (order.orderPackages || [])
@@ -894,31 +960,68 @@ function formatOrderStatus(order) {
     .find((info) => info.trackingNumber || info.trackingLink || info.cargoCompany);
 
   return [
-    `Siparisinizi buldum. Siparis no: ${order.orderNumber}.`,
-    `Siparis durumu: ${humanizeOrderStatus(order.status)}.`,
-    `Odeme durumu: ${humanizeOrderStatus(order.orderPaymentStatus)}.`,
-    `Kargo/paket durumu: ${humanizeOrderStatus(order.orderPackageStatus)}.`,
-    items ? `Urunler: ${items}.` : "",
-    tracking?.cargoCompany ? `Kargo firmasi: ${tracking.cargoCompany}.` : "",
+    `Siparişinizi buldum. Sipariş no: ${order.orderNumber}.`,
+    `Sipariş durumu: ${humanizeOrderStatus(order.status, "order")}.`,
+    `Ödeme durumu: ${humanizeOrderStatus(order.orderPaymentStatus, "payment")}.`,
+    `Kargo/paket durumu: ${humanizeOrderStatus(order.orderPackageStatus, "package")}.`,
+    items ? `Ürünler: ${items}.` : "",
+    tracking?.cargoCompany ? `Kargo firması: ${tracking.cargoCompany}.` : "",
     tracking?.trackingNumber ? `Takip no: ${tracking.trackingNumber}.` : "",
     tracking?.trackingLink ? `Takip linki: ${tracking.trackingLink}` : ""
   ].filter(Boolean).join("\n");
 }
 
-function humanizeOrderStatus(status) {
-  const map = {
-    PAID: "Odendi",
-    UNPAID: "Odeme bekliyor",
-    FULFILLED: "Kargoya/teslime hazirlandi",
-    UNFULFILLED: "Hazirlaniyor",
-    PARTIALLY_FULFILLED: "Kismen hazirlandi",
-    REFUNDED: "Iade edildi",
-    CANCELLED: "Iptal edildi",
-    COMPLETED: "Tamamlandi",
-    OPEN: "Acik",
-    CLOSED: "Kapali"
+function humanizeOrderStatus(status, type = "order") {
+  const raw = String(status || "").trim().toUpperCase();
+  if (!raw) return "Belirsiz";
+
+  const common = {
+    CREATED: "Oluşturuldu",
+    OPEN: "Açık",
+    CLOSED: "Kapalı",
+    COMPLETED: "Tamamlandı",
+    CANCELLED: "İptal edildi",
+    CANCELED: "İptal edildi",
+    PROCESSING: "İşlemde",
+    PENDING: "Beklemede",
+    APPROVED: "Onaylandı",
+    REJECTED: "Reddedildi"
   };
-  return map[status] || status || "Belirsiz";
+
+  const byType = {
+    payment: {
+      PAID: "Ödendi",
+      UNPAID: "Ödeme bekliyor",
+      PARTIALLY_PAID: "Kısmen ödendi",
+      REFUNDED: "İade edildi",
+      PARTIALLY_REFUNDED: "Kısmen iade edildi",
+      WAITING_PAYMENT: "Ödeme bekliyor",
+      AWAITING_PAYMENT: "Ödeme bekliyor",
+      FAILED: "Ödeme başarısız",
+      AUTHORIZED: "Ödeme onaylandı"
+    },
+    package: {
+      DELIVERED: "Teslim edildi",
+      SHIPPED: "Kargoya verildi",
+      FULFILLED: "Hazırlandı",
+      UNFULFILLED: "Hazırlanıyor",
+      PARTIALLY_FULFILLED: "Kısmen hazırlandı",
+      READY_FOR_SHIPMENT: "Kargoya hazır",
+      READY_TO_SHIP: "Kargoya hazır",
+      IN_TRANSIT: "Yolda",
+      OUT_FOR_DELIVERY: "Dağıtıma çıktı",
+      RETURNED: "İade edildi"
+    },
+    order: {
+      CREATED: "Oluşturuldu",
+      FULFILLED: "Hazırlandı",
+      UNFULFILLED: "Hazırlanıyor",
+      PARTIALLY_FULFILLED: "Kısmen hazırlandı",
+      REFUNDED: "İade edildi"
+    }
+  };
+
+  return byType[type]?.[raw] || common[raw] || "Kontrol ediliyor";
 }
 
 function doesContactMatchOrder(contact, order) {
@@ -965,9 +1068,10 @@ function extractCustomerContact(message) {
 function extractProductSearchTerm(message, page) {
   const source = `${message || ""} ${page?.pageTitle || ""}`;
   const ignored = new Set([
-    "urun", "hakkinda", "bilgi", "stok", "fiyat", "var", "mi", "mu",
+    "urun", "urunler", "hakkinda", "bilgi", "stok", "fiyat", "var", "varmi", "mi", "mu",
     "nedir", "kac", "tl", "ruth", "istanbul", "kolye", "yuzuk", "bileklik", "kupe",
-    "bir", "almak", "istiyorum", "soruyorum", "sorarim", "sorabilir", "hangi"
+    "bir", "bu", "bunlar", "su", "foto", "fotograf", "gorsel", "mevcut", "satis", "satiliyor", "satista",
+    "almak", "istiyorum", "soruyorum", "sorarim", "sorabilir", "hangi"
   ]);
   const words = normalize(source)
     .split(/[^a-z0-9]+/)
@@ -1091,6 +1195,11 @@ function isOwnerReportRequest(message) {
   const mentionsBoss = /(patron|admin|yonetici|sahip|gorkem)/.test(text);
   const asksReport = /(rapor|veri|istatistik|kac kisi|konusan|musteri|bugun|gunluk|toplam)/.test(text);
   return asksReport && (mentionsOwner || mentionsBoss);
+}
+
+function isOwnerIdentityRequest(message) {
+  const text = normalize(message);
+  return /(ben gorkem cirik|ben gorkem|gorkem cirik benim|gorkem cirik)/.test(text);
 }
 
 function isOwnerSecurityAnswer(message) {
