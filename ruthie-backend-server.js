@@ -371,24 +371,21 @@ async function answerImageWithOpenAI({ message, imageFile, sessionId, visitorNam
     return { message: "Bu dosya fotograf gibi gorunmuyor. PNG, JPG veya WEBP olarak tekrar gonderebilir misiniz?" };
   }
 
-  if (isAvailabilityQuestion(message)) {
-    const messageText = [
-      "Fotoğrafı aldım.",
-      "Ürün uygunluğu veya kalan adet bilgisi paylaşamıyorum.",
-      "Ürün adını ya da ürün linkini yazarsanız panelden ürün bilgilerini kontrol edip fiyat/link konusunda yardımcı olabilirim."
-    ].join("\n");
-    rememberImageContext(sessionId, messageText);
-    rememberTurn(sessionId, message || "[fotograf]", messageText);
-    return { message: messageText };
-  }
+  const photoCatalogContext = await buildPhotoCatalogContext().catch(() => "");
 
   const prompt = [
     "Musterinin gonderdigi fotografi yorumla.",
     "RUTH ISTANBUL handmade taki markasi icin Ruthie adli musteri hizmetleri asistanisin.",
     "Turkce, sicak, kisa ve zarif cevap ver.",
     "Gorseldeki taki tarzi, renk, model benzerligi, kombin onerisi veya bakim sorusu icin yardimci ol.",
-    "Kesin urun eslestirmesi yapamiyorsan emin olmadigini soyle ve urun adi ya da urun linki iste.",
+    "Gorseldeki urunu katalogdaki urunlerden biriyle guvenli sekilde eslestirebiliyorsan urun adini ve linkini ver.",
+    "Sayfa URL'si urun sayfasi gibi gorunuyorsa link olarak o URL'yi de kullanabilirsin.",
+    "Kesin urun eslestirmesi yapamiyorsan emin olmadigini soyle; link uydurma, urun adi ya da urun linki iste.",
+    "Musteri 'var mi' diye sorsa bile urun uygunlugu, adet, kalan urun veya var/yok bilgisi verme.",
     "Musteriye hicbir durumda stok, adet, kalan urun veya var/yok bilgisi verme.",
+    photoCatalogContext ? `IKAS KATALOG URUNLERI:\n${photoCatalogContext}` : "",
+    "RUTHIE EGITIM METNI:",
+    readKnowledge(),
     `Musteri adi: ${visitorName || "bilinmiyor"}`,
     `Sayfa: ${pageTitle || ""} ${pageUrl || ""}`.trim(),
     `Musteri mesaji: ${message || "Fotograf gonderdi."}`
@@ -656,6 +653,26 @@ async function buildIkasLiveContext(message, page) {
     console.error("Ikas live product context error:", error && error.message ? error.message : error);
     return "Ikas panelinden urun bilgisi alinamadi; kesin fiyat bilgisi verme.";
   }
+}
+
+async function buildPhotoCatalogContext() {
+  if (!isIkasConfigured()) return "";
+
+  const products = await findIkasProducts("");
+  return products
+    .slice(0, 80)
+    .map((product) => {
+      const description = stripHtml(product.shortDescription || product.description || "").slice(0, 160);
+      const link = buildProductUrl(product);
+      return [
+        `Urun: ${product.name}`,
+        description ? `Aciklama: ${description}` : "",
+        `Fiyat: ${getProductPriceText(product)}`,
+        link ? `Link: ${link}` : ""
+      ].filter(Boolean).join(" | ");
+    })
+    .join("\n")
+    .slice(0, 12000);
 }
 
 async function buildIkasTestReport(orderNumber) {
