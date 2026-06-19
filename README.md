@@ -12,6 +12,10 @@ Environment Variables:
 - `OPENAI_MODEL`: `gpt-5.4-mini`
 - `RUTHIE_OWNER_SECURITY_ANSWER`: `enes`
 - `RUTHIE_OWNER_SECRET`: sadece patron raporu icin gizli kod
+- `IKAS_STORE_DOMAIN`: ikas admin alan adin, ornek `magaza-adin.myikas.com`
+- `IKAS_CLIENT_ID`: ikas ozel uygulama Client ID
+- `IKAS_CLIENT_SECRET`: ikas ozel uygulama Client Secret
+- `IKAS_SITE_URL`: magaza site adresin, ornek `https://ruthistanbul.com`
 
 Render linki olusunca ikas kodundaki backend adresi su formatta olacak:
 
