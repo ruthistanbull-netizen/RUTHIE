@@ -8,7 +8,7 @@ const OWNER_NAME = process.env.RUTHIE_OWNER_NAME || "Gorkem Cirik";
 const OWNER_SECRET = process.env.RUTHIE_OWNER_SECRET || "";
 const OWNER_SECURITY_ANSWER = process.env.RUTHIE_OWNER_SECURITY_ANSWER || "enes";
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
-const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-5.4-mini";
+const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-5-mini";
 const KNOWLEDGE_FILE = process.env.RUTHIE_KNOWLEDGE_FILE || path.join(__dirname, "ruthie-bilgi-bankasi.txt");
 const IKAS_STORE_DOMAIN = process.env.IKAS_STORE_DOMAIN || "";
 const IKAS_CLIENT_ID = process.env.IKAS_CLIENT_ID || "";
@@ -125,6 +125,7 @@ const server = http.createServer(async (req, res) => {
       model: OPENAI_MODEL
     });
   } catch (error) {
+    console.error("Ruthie request error:", error && error.message ? error.message : error);
     sendJson(res, {
       handoff: true,
       message: "Ruthie su anda yaniti netlestiremedi. WhatsApp destek ekibimiz hemen yardimci olabilir."
@@ -204,7 +205,8 @@ async function answerWithOpenAI({ message, sessionId, visitorName, pageUrl, page
   });
 
   if (!response.ok) {
-    throw new Error(`openai_error_${response.status}`);
+    const errorText = await response.text().catch(() => "");
+    throw new Error(`openai_error_${response.status}: ${errorText.slice(0, 300)}`);
   }
 
   const data = await response.json();
