@@ -8,7 +8,7 @@ const OWNER_NAME = process.env.RUTHIE_OWNER_NAME || "Gorkem Cirik";
 const OWNER_SECRET = process.env.RUTHIE_OWNER_SECRET || "";
 const OWNER_SECURITY_ANSWER = process.env.RUTHIE_OWNER_SECURITY_ANSWER || "enes";
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
-const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-5-mini";
+const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
 const OPENAI_VISION_MODEL = process.env.OPENAI_VISION_MODEL || OPENAI_MODEL;
 const MAX_IMAGE_UPLOAD_BYTES = Number(process.env.RUTHIE_MAX_IMAGE_UPLOAD_BYTES || 6_000_000);
 const KNOWLEDGE_FILE = process.env.RUTHIE_KNOWLEDGE_FILE || path.join(__dirname, "ruthie-bilgi-bankasi.txt");
@@ -317,19 +317,19 @@ async function answerWithOpenAI({ message, sessionId, visitorName, pageUrl, page
     `Yeni mesaj: ${message || ""}`
   ].filter(Boolean).join("\n\n");
 
+  const requestBody = withModelSpecificOptions({
+    model: OPENAI_MODEL,
+    instructions: buildAssistantInstructions(),
+    input: inputText
+  }, OPENAI_MODEL);
+
   const response = await fetch("https://api.openai.com/v1/responses", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${OPENAI_API_KEY}`
     },
-    body: JSON.stringify({
-      model: OPENAI_MODEL,
-      reasoning: { effort: "low" },
-      text: { verbosity: "low" },
-      instructions: buildAssistantInstructions(),
-      input: inputText
-    })
+    body: JSON.stringify(requestBody)
   });
 
   if (!response.ok) {
@@ -392,29 +392,29 @@ async function answerImageWithOpenAI({ message, imageFile, sessionId, visitorNam
   ].filter(Boolean).join("\n");
 
   try {
+    const requestBody = withModelSpecificOptions({
+      model: OPENAI_VISION_MODEL,
+      input: [
+        {
+          role: "user",
+          content: [
+            { type: "input_text", text: prompt },
+            {
+              type: "input_image",
+              image_url: `data:${imageFile.contentType};base64,${imageFile.buffer.toString("base64")}`
+            }
+          ]
+        }
+      ]
+    }, OPENAI_VISION_MODEL);
+
     const response = await fetch("https://api.openai.com/v1/responses", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${OPENAI_API_KEY}`
       },
-      body: JSON.stringify({
-        model: OPENAI_VISION_MODEL,
-        reasoning: { effort: "low" },
-        text: { verbosity: "low" },
-        input: [
-          {
-            role: "user",
-            content: [
-              { type: "input_text", text: prompt },
-              {
-                type: "input_image",
-                image_url: `data:${imageFile.contentType};base64,${imageFile.buffer.toString("base64")}`
-              }
-            ]
-          }
-        ]
-      })
+      body: JSON.stringify(requestBody)
     });
 
     if (!response.ok) {
@@ -469,6 +469,18 @@ function readKnowledge() {
       "Magaza paneli ve canli siparis/urun baglantisi henuz eklenmedi."
     ].join("\n");
   }
+}
+
+function withModelSpecificOptions(body, model) {
+  const normalized = String(model || "").toLowerCase();
+  if (normalized.startsWith("gpt-5") || /^o\d/.test(normalized)) {
+    return {
+      ...body,
+      reasoning: { effort: "low" },
+      text: { verbosity: "low" }
+    };
+  }
+  return body;
 }
 
 function extractOutputText(data) {
@@ -776,80 +788,113 @@ function normalizeIkasStoreDomain(value) {
 }
 
 async function findIkasProducts(term) {
+  const productFields = `
+    data {
+      id
+      name
+      shortDescription
+      description
+      variants {
+        id
+        sku
+        prices {
+          sellPrice
+          discountPrice
+          currencyCode
+          currencySymbol
+        }
+      }
+    }
+  `;
   const query = term ? `
     query RuthieProducts($term: String) {
       listProduct(name: { like: $term }, pagination: { limit: 200, page: 1 }, sort: "name") {
-        data {
-          id
-          name
-          shortDescription
-          description
-          variants {
-            id
-            sku
-            prices {
-              sellPrice
-              discountPrice
-              currencyCode
-              currencySymbol
-            }
-          }
-        }
+        ${productFields}
       }
     }
   ` : `
     query RuthieProducts {
       listProduct(pagination: { limit: 200, page: 1 }, sort: "name") {
-        data {
-          id
-          name
-          shortDescription
-          description
-          variants {
-            id
-            sku
-            prices {
-              sellPrice
-              discountPrice
-              currencyCode
-              currencySymbol
-            }
-          }
-        }
+        ${productFields}
       }
     }
   `;
 
   try {
     const data = await ikasGraphql(query, term ? { term } : {});
-    return data.listProduct?.data || [];
+    const products = data.listProduct?.data || [];
+    if (!term) return products;
+
+    const ranked = rankProductMatches(products, term);
+    if (ranked.length) return ranked;
+
+    const fallbackData = await ikasGraphql(`
+      query RuthieProductsAll {
+        listProduct(pagination: { limit: 200, page: 1 }, sort: "name") {
+          ${productFields}
+        }
+      }
+    `);
+    return rankProductMatches(fallbackData.listProduct?.data || [], term);
   } catch (error) {
     const fallbackQuery = `
       query RuthieProductsFallback {
         listProduct(pagination: { limit: 200, page: 1 }, sort: "name") {
-          data {
-            id
-            name
-            shortDescription
-            description
-            variants {
-              id
-              sku
-              prices {
-                sellPrice
-                discountPrice
-                currencyCode
-                currencySymbol
-              }
-            }
-          }
+          ${productFields}
         }
       }
     `;
     const data = await ikasGraphql(fallbackQuery);
     const products = data.listProduct?.data || [];
-    return term ? products.filter((product) => normalize(product.name).includes(normalize(term))).slice(0, 12) : products;
+    return term ? rankProductMatches(products, term) : products;
   }
+}
+
+function rankProductMatches(products, term) {
+  const search = normalizeProductSearch(term);
+  if (!search) return products;
+
+  const searchTokens = getProductSearchTokens(search);
+  const scored = (products || [])
+    .map((product) => {
+      const name = normalizeProductSearch(product.name);
+      const skuText = normalizeProductSearch((product.variants || []).map((variant) => variant.sku || "").join(" "));
+      const description = normalizeProductSearch(`${product.shortDescription || ""} ${stripHtml(product.description || "")}`);
+      const nameTokens = getProductSearchTokens(name);
+      let score = 0;
+
+      if (name === search) score = 120;
+      else if (name.includes(search)) score = 105;
+      else if (search.includes(name) && name.length >= 5) score = 95;
+      else if (searchTokens.length && searchTokens.every((token) => nameTokens.includes(token))) score = 85 + searchTokens.length;
+      else if (searchTokens.length >= 2 && searchTokens.every((token) => description.includes(token))) score = 45 + searchTokens.length;
+      else if (searchTokens.length === 1 && (nameTokens.includes(searchTokens[0]) || skuText.includes(searchTokens[0]))) score = 35;
+      else if (skuText && skuText.includes(search)) score = 90;
+
+      return { product, score, name };
+    })
+    .filter((item) => item.score > 0)
+    .sort((a, b) => b.score - a.score || a.name.localeCompare(b.name));
+
+  return scored.slice(0, 12).map((item) => item.product);
+}
+
+function normalizeProductSearch(value) {
+  return normalize(stripHtml(value))
+    .replace(/&/g, " and ")
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function getProductSearchTokens(value) {
+  const ignored = new Set([
+    "the", "and", "with", "for", "bir", "bu", "su", "urun", "urunler", "kolye", "yuzuk",
+    "bileklik", "kupe", "necklace", "ring", "bracelet", "earring", "set", "model"
+  ]);
+  return normalizeProductSearch(value)
+    .split(" ")
+    .filter((token) => token.length > 2 && !ignored.has(token));
 }
 
 async function findIkasOrder(orderNumber) {
@@ -1083,17 +1128,21 @@ function extractCustomerContact(message) {
 }
 
 function extractProductSearchTerm(message, page) {
-  const source = `${message || ""} ${page?.pageTitle || ""}`;
+  const productPath = String(message || "").match(/\/products\/([^?#\s]+)/i)?.[1] || "";
+  const readablePath = productPath.replace(/[-_]+/g, " ");
+  const source = `${readablePath} ${message || ""} ${page?.pageTitle || ""}`;
   const ignored = new Set([
     "urun", "urunler", "hakkinda", "bilgi", "stok", "fiyat", "var", "varmi", "mi", "mu",
     "nedir", "kac", "tl", "ruth", "istanbul", "kolye", "yuzuk", "bileklik", "kupe",
     "bir", "bu", "bunlar", "su", "foto", "fotograf", "gorsel", "mevcut", "satis", "satiliyor", "satista",
-    "almak", "istiyorum", "soruyorum", "sorarim", "sorabilir", "hangi"
+    "almak", "istiyorum", "soruyorum", "sorarim", "sorabilir", "hangi",
+    "http", "https", "www", "com", "products", "product", "the", "and", "with", "for",
+    "necklace", "ring", "bracelet", "earring", "jewelry", "jewellery", "model"
   ]);
   const words = normalize(source)
     .split(/[^a-z0-9]+/)
     .filter((word) => word.length > 2 && !ignored.has(word));
-  return words.slice(0, 3).join(" ");
+  return [...new Set(words)].slice(0, 5).join(" ");
 }
 
 function stripHtml(value) {
