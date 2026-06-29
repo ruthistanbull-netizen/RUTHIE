@@ -1,4 +1,4 @@
-﻿const http = require("http");
+const http = require("http");
 const fs = require("fs");
 const path = require("path");
 
@@ -173,6 +173,30 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    if (req.method === "GET") {
+      const panelUrl = new URL(req.url, `http://${req.headers.host}`);
+
+      if (panelUrl.pathname === "/" || panelUrl.pathname === "/panel" || panelUrl.pathname === "/admin") {
+        sendHtml(res, buildPanelHtml());
+        return;
+      }
+
+      if (panelUrl.pathname === "/manifest.webmanifest") {
+        sendText(res, JSON.stringify(buildPanelManifest(), null, 2), "application/manifest+json; charset=utf-8");
+        return;
+      }
+
+      if (panelUrl.pathname === "/favicon.svg" || panelUrl.pathname === "/apple-touch-icon.svg") {
+        sendText(res, buildPanelIconSvg(), "image/svg+xml; charset=utf-8");
+        return;
+      }
+
+      if (panelUrl.pathname === "/sw.js") {
+        sendText(res, buildPanelServiceWorker(), "application/javascript; charset=utf-8");
+        return;
+      }
+    }
+
     sendJson(res, {
       ok: true,
       service: "Ruthie backend is running",
@@ -203,6 +227,22 @@ function setCors(res) {
 function sendJson(res, payload, status = 200) {
   res.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
   res.end(JSON.stringify(payload));
+}
+
+function sendHtml(res, html, status = 200) {
+  res.writeHead(status, {
+    "Content-Type": "text/html; charset=utf-8",
+    "Cache-Control": "no-store"
+  });
+  res.end(html);
+}
+
+function sendText(res, text, contentType = "text/plain; charset=utf-8", status = 200) {
+  res.writeHead(status, {
+    "Content-Type": contentType,
+    "Cache-Control": contentType.includes("javascript") ? "no-cache" : "public, max-age=3600"
+  });
+  res.end(text);
 }
 
 function readJson(req) {
@@ -1421,3 +1461,1023 @@ function createSessionId() {
   return `ruth_${Date.now()}_${Math.random().toString(16).slice(2)}`;
 }
 
+
+function buildPanelManifest() {
+  return {
+    name: "Ruthie Panel",
+    short_name: "Ruthie",
+    description: "Ruth Istanbul destek paneli",
+    start_url: "/panel",
+    scope: "/",
+    display: "standalone",
+    background_color: "#f6f0e7",
+    theme_color: "#18130f",
+    icons: [
+      { src: "/favicon.svg", sizes: "192x192", type: "image/svg+xml" },
+      { src: "/apple-touch-icon.svg", sizes: "512x512", type: "image/svg+xml" }
+    ]
+  };
+}
+
+function buildPanelIconSvg() {
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#f6efe3"/>
+      <stop offset="0.55" stop-color="#d7bc91"/>
+      <stop offset="1" stop-color="#17120f"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="118" fill="url(#g)"/>
+  <rect x="38" y="38" width="436" height="436" rx="92" fill="none" stroke="rgba(255,255,255,.46)" stroke-width="2"/>
+  <text x="256" y="309" text-anchor="middle" font-family="Georgia, 'Times New Roman', serif" font-size="196" font-weight="500" fill="#15110e">R</text>
+</svg>`;
+}
+
+function buildPanelServiceWorker() {
+  return `const CACHE_NAME = 'ruthie-panel-v2';
+const SHELL = ['/panel', '/favicon.svg', '/apple-touch-icon.svg'];
+self.addEventListener('install', event => {
+  event.waitUntil(caches.open(CACHE_NAME).then(cache => cache.addAll(SHELL)).then(() => self.skipWaiting()));
+});
+self.addEventListener('activate', event => {
+  event.waitUntil(caches.keys().then(keys => Promise.all(keys.filter(key => key !== CACHE_NAME).map(key => caches.delete(key)))).then(() => self.clients.claim()));
+});
+self.addEventListener('fetch', event => {
+  const url = new URL(event.request.url);
+  if (url.pathname.startsWith('/api/')) return;
+  event.respondWith(fetch(event.request).catch(() => caches.match(event.request).then(response => response || caches.match('/panel'))));
+});`;
+}
+
+function buildPanelHtml() {
+  return `<!doctype html>
+<html lang="tr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#18130f" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Ruthie" />
+  <meta name="format-detection" content="telephone=no" />
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+  <link rel="apple-touch-icon" href="/apple-touch-icon.svg" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@400;500;600;700&family=Montserrat:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
+  <title>Ruthie Panel</title>
+  <style>
+    :root {
+      --ink: #18130f;
+      --ink-2: #33291f;
+      --paper: #f7f1e8;
+      --paper-2: #efe4d4;
+      --paper-3: #fffaf3;
+      --gold: #b99663;
+      --gold-2: #d8bd8e;
+      --gold-3: #8b704b;
+      --line: rgba(38, 29, 20, .12);
+      --line-2: rgba(185, 150, 99, .35);
+      --white-glass: rgba(255, 250, 243, .72);
+      --black-glass: rgba(24, 19, 15, .76);
+      --danger: #8a332b;
+      --ok: #486f55;
+      --shadow: 0 24px 70px rgba(45, 33, 21, .14);
+      --shadow-soft: 0 16px 42px rgba(45, 33, 21, .10);
+      --radius-xl: 34px;
+      --radius-lg: 24px;
+      --radius-md: 18px;
+      --safe-top: env(safe-area-inset-top, 0px);
+      --safe-bottom: env(safe-area-inset-bottom, 0px);
+      color-scheme: light;
+    }
+
+    * { box-sizing: border-box; }
+    html { min-height: 100%; background: var(--paper); -webkit-text-size-adjust: 100%; }
+    body {
+      min-height: 100vh;
+      margin: 0;
+      font-family: Montserrat, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 12% 8%, rgba(216, 189, 142, .28), transparent 32vw),
+        radial-gradient(circle at 88% 4%, rgba(185, 150, 99, .20), transparent 30vw),
+        linear-gradient(135deg, #fbf6ee 0%, #efe3d2 48%, #f8f0e4 100%);
+      overflow-x: hidden;
+      overscroll-behavior: none;
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    body::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      opacity: .32;
+      background-image:
+        linear-gradient(rgba(24, 19, 15, .04) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(24, 19, 15, .04) 1px, transparent 1px);
+      background-size: 48px 48px;
+      mask-image: linear-gradient(to bottom, rgba(0,0,0,.7), transparent 78%);
+      z-index: 0;
+    }
+
+    a { color: inherit; text-decoration: none; }
+    button, input, textarea { font: inherit; }
+    button { cursor: pointer; }
+
+    .app-shell {
+      position: relative;
+      z-index: 1;
+      min-height: 100vh;
+      padding: calc(18px + var(--safe-top)) 18px calc(24px + var(--safe-bottom));
+      display: grid;
+      grid-template-columns: 290px minmax(0, 1fr);
+      gap: 18px;
+    }
+
+    .sidebar {
+      position: sticky;
+      top: calc(18px + var(--safe-top));
+      height: calc(100vh - 36px - var(--safe-top) - var(--safe-bottom));
+      border: 1px solid rgba(255,255,255,.42);
+      background: linear-gradient(180deg, rgba(24, 19, 15, .94), rgba(45, 34, 25, .88));
+      color: #fff8ed;
+      border-radius: var(--radius-xl);
+      box-shadow: var(--shadow);
+      overflow: hidden;
+      isolation: isolate;
+    }
+
+    .sidebar::before {
+      content: "";
+      position: absolute;
+      inset: -20%;
+      background:
+        radial-gradient(circle at 24% 8%, rgba(216, 189, 142, .28), transparent 28%),
+        radial-gradient(circle at 70% 80%, rgba(255,255,255,.11), transparent 24%);
+      z-index: -1;
+      animation: glowDrift 12s ease-in-out infinite alternate;
+    }
+
+    .brand-card {
+      padding: 28px 24px 20px;
+      border-bottom: 1px solid rgba(255,255,255,.12);
+    }
+
+    .brand-row { display: flex; align-items: center; gap: 14px; }
+    .brand-mark {
+      width: 54px; height: 54px; border-radius: 20px;
+      display: grid; place-items: center;
+      background: linear-gradient(135deg, #f8efd7, #b99663 62%, #6f5432);
+      color: #15100d;
+      font-family: Cinzel, Georgia, serif;
+      font-size: 30px;
+      box-shadow: 0 15px 34px rgba(0,0,0,.28), inset 0 1px 0 rgba(255,255,255,.6);
+      transform: translateZ(0);
+    }
+
+    .brand-kicker {
+      margin: 0 0 4px;
+      font-size: 10px;
+      letter-spacing: .28em;
+      text-transform: uppercase;
+      color: rgba(255,248,237,.58);
+    }
+
+    .brand-title {
+      margin: 0;
+      font-family: Cinzel, Georgia, serif;
+      font-size: 22px;
+      font-weight: 500;
+      letter-spacing: .05em;
+    }
+
+    .brand-subtitle {
+      margin: 16px 0 0;
+      max-width: 220px;
+      color: rgba(255,248,237,.70);
+      font-size: 12px;
+      line-height: 1.75;
+    }
+
+    .nav {
+      display: grid;
+      gap: 8px;
+      padding: 18px 14px;
+    }
+
+    .nav-button {
+      width: 100%;
+      border: 1px solid transparent;
+      border-radius: 18px;
+      padding: 14px 14px;
+      color: rgba(255,248,237,.78);
+      background: transparent;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      text-align: left;
+      transition: transform .22s ease, background .22s ease, border-color .22s ease, color .22s ease;
+      touch-action: manipulation;
+    }
+
+    .nav-button:active { transform: scale(.975); }
+    .nav-button:hover,
+    .nav-button.active {
+      color: #fff9ef;
+      background: rgba(255,255,255,.09);
+      border-color: rgba(216,189,142,.25);
+    }
+
+    .nav-icon {
+      width: 34px; height: 34px;
+      border-radius: 13px;
+      display: grid; place-items: center;
+      background: rgba(255,255,255,.08);
+      border: 1px solid rgba(255,255,255,.10);
+      color: var(--gold-2);
+      flex: 0 0 auto;
+    }
+
+    .nav-copy { display: grid; gap: 2px; }
+    .nav-label { font-size: 13px; font-weight: 600; letter-spacing: .02em; }
+    .nav-hint { font-size: 10px; color: rgba(255,248,237,.48); }
+
+    .sidebar-footer {
+      position: absolute;
+      left: 14px; right: 14px; bottom: 14px;
+      padding: 14px;
+      border-radius: 22px;
+      background: rgba(255,255,255,.07);
+      border: 1px solid rgba(255,255,255,.10);
+      color: rgba(255,248,237,.66);
+      font-size: 11px;
+      line-height: 1.55;
+    }
+
+    .main { min-width: 0; display: grid; gap: 18px; align-content: start; }
+
+    .topbar {
+      position: sticky;
+      top: calc(18px + var(--safe-top));
+      z-index: 10;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
+      padding: 14px 16px;
+      border-radius: 28px;
+      background: rgba(255,250,243,.72);
+      border: 1px solid rgba(255,255,255,.65);
+      box-shadow: var(--shadow-soft);
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+    }
+
+    .mobile-menu-button { display: none; }
+    .page-title { min-width: 0; }
+    .page-title p {
+      margin: 0 0 4px;
+      font-size: 10px;
+      letter-spacing: .24em;
+      text-transform: uppercase;
+      color: rgba(24,19,15,.52);
+    }
+    .page-title h1 {
+      margin: 0;
+      font-family: Cinzel, Georgia, serif;
+      font-size: clamp(23px, 3vw, 42px);
+      font-weight: 500;
+      letter-spacing: .025em;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .top-actions { display: flex; align-items: center; gap: 10px; }
+
+    .pill-button,
+    .ghost-button,
+    .icon-button {
+      border: 1px solid rgba(24,19,15,.12);
+      min-height: 44px;
+      color: var(--ink);
+      border-radius: 999px;
+      background: rgba(255,255,255,.56);
+      box-shadow: 0 10px 26px rgba(41,31,21,.08);
+      transition: transform .2s ease, box-shadow .2s ease, border-color .2s ease, background .2s ease;
+      touch-action: manipulation;
+      user-select: none;
+    }
+    .pill-button { padding: 0 18px; font-size: 12px; font-weight: 600; letter-spacing: .04em; }
+    .ghost-button { padding: 0 16px; font-size: 12px; font-weight: 600; background: transparent; }
+    .icon-button { width: 44px; display: grid; place-items: center; }
+    .pill-button:hover,
+    .ghost-button:hover,
+    .icon-button:hover { transform: translateY(-1px); border-color: var(--line-2); box-shadow: 0 14px 32px rgba(41,31,21,.12); }
+    .pill-button:active,
+    .ghost-button:active,
+    .icon-button:active { transform: scale(.97); }
+    .pill-button.primary {
+      color: #fff8ed;
+      border-color: rgba(24,19,15,.18);
+      background: linear-gradient(135deg, #19130f, #3b2c1f 58%, #b99663 160%);
+    }
+
+    .view {
+      display: none;
+      animation: viewIn .46s cubic-bezier(.22,1,.36,1) both;
+    }
+    .view.active { display: block; }
+
+    .hero-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1.2fr) minmax(270px, .8fr);
+      gap: 18px;
+      align-items: stretch;
+    }
+
+    .hero-card,
+    .panel-card {
+      border-radius: var(--radius-xl);
+      background: rgba(255,250,243,.74);
+      border: 1px solid rgba(255,255,255,.70);
+      box-shadow: var(--shadow-soft);
+      backdrop-filter: blur(18px);
+      -webkit-backdrop-filter: blur(18px);
+      overflow: hidden;
+    }
+
+    .hero-card {
+      min-height: 310px;
+      padding: clamp(24px, 4vw, 48px);
+      position: relative;
+      isolation: isolate;
+    }
+    .hero-card::before {
+      content: "";
+      position: absolute;
+      inset: auto -18% -42% 30%;
+      height: 290px;
+      border-radius: 999px;
+      background: radial-gradient(circle, rgba(185,150,99,.24), transparent 68%);
+      z-index: -1;
+      animation: floatGlow 8s ease-in-out infinite alternate;
+    }
+
+    .eyebrow {
+      margin: 0 0 14px;
+      font-size: 11px;
+      letter-spacing: .28em;
+      text-transform: uppercase;
+      color: var(--gold-3);
+      font-weight: 600;
+    }
+    .hero-card h2 {
+      margin: 0;
+      max-width: 670px;
+      font-family: Cinzel, Georgia, serif;
+      font-size: clamp(34px, 5vw, 72px);
+      font-weight: 400;
+      line-height: .98;
+      letter-spacing: -.035em;
+    }
+    .hero-card h2 span { color: #9e7b4d; }
+    .hero-copy {
+      margin: 22px 0 0;
+      max-width: 590px;
+      color: rgba(24,19,15,.62);
+      line-height: 1.85;
+      font-size: 14px;
+    }
+    .hero-actions { margin-top: 28px; display: flex; flex-wrap: wrap; gap: 10px; }
+
+    .status-card { padding: 22px; display: grid; gap: 14px; }
+    .status-top { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+    .status-dot {
+      width: 10px; height: 10px; border-radius: 999px; background: var(--ok);
+      box-shadow: 0 0 0 7px rgba(72,111,85,.12);
+      animation: pulse 2.2s ease-in-out infinite;
+    }
+    .mini-title { margin: 0; font-size: 12px; letter-spacing: .18em; text-transform: uppercase; color: rgba(24,19,15,.48); }
+    .big-number { margin: 0; font-family: Cinzel, Georgia, serif; font-size: clamp(42px, 7vw, 82px); line-height: .9; font-weight: 400; }
+    .muted { color: rgba(24,19,15,.56); }
+
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 14px;
+      margin-top: 18px;
+    }
+    .stat-card {
+      position: relative;
+      min-height: 150px;
+      padding: 20px;
+      border-radius: 28px;
+      background: rgba(255,250,243,.74);
+      border: 1px solid rgba(255,255,255,.70);
+      box-shadow: 0 14px 36px rgba(45,33,21,.08);
+      overflow: hidden;
+    }
+    .stat-card::after {
+      content: "";
+      position: absolute;
+      inset: auto -20px -50px auto;
+      width: 120px; height: 120px; border-radius: 999px;
+      background: rgba(185,150,99,.14);
+    }
+    .stat-card p { margin: 0; position: relative; z-index: 1; }
+    .stat-label { font-size: 11px; letter-spacing: .15em; text-transform: uppercase; color: rgba(24,19,15,.48); }
+    .stat-value { margin-top: 18px !important; font-family: Cinzel, Georgia, serif; font-size: 42px; line-height: 1; }
+    .stat-note { margin-top: 10px !important; font-size: 11px; color: rgba(24,19,15,.52); line-height: 1.5; }
+
+    .section-grid { display: grid; grid-template-columns: minmax(0, .95fr) minmax(290px, .55fr); gap: 18px; margin-top: 18px; }
+    .panel-card { padding: 22px; }
+    .card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; margin-bottom: 16px; }
+    .card-head h3 { margin: 0; font-family: Cinzel, Georgia, serif; font-weight: 500; font-size: 23px; }
+    .card-head p { margin: 5px 0 0; font-size: 12px; line-height: 1.6; color: rgba(24,19,15,.54); }
+
+    .bar-chart { display: grid; gap: 12px; padding-top: 6px; }
+    .bar-row { display: grid; grid-template-columns: 94px minmax(0, 1fr) 42px; gap: 10px; align-items: center; font-size: 12px; color: rgba(24,19,15,.60); }
+    .bar-track { height: 12px; border-radius: 999px; background: rgba(24,19,15,.08); overflow: hidden; }
+    .bar-fill { height: 100%; width: 0%; border-radius: inherit; background: linear-gradient(90deg, #18130f, #b99663); transition: width .7s cubic-bezier(.22,1,.36,1); }
+
+    .person-list, .timeline-list { display: grid; gap: 10px; }
+    .person-item, .timeline-item {
+      padding: 14px;
+      border-radius: 20px;
+      background: rgba(255,255,255,.44);
+      border: 1px solid rgba(24,19,15,.08);
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      animation: itemIn .45s ease both;
+    }
+    .avatar {
+      width: 38px; height: 38px; border-radius: 15px;
+      display: grid; place-items: center;
+      background: linear-gradient(135deg, #18130f, #b99663);
+      color: #fff8ed;
+      font-family: Cinzel, Georgia, serif;
+      flex: 0 0 auto;
+    }
+    .item-copy { min-width: 0; }
+    .item-copy strong { display: block; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .item-copy span { display: block; margin-top: 3px; font-size: 11px; color: rgba(24,19,15,.52); }
+
+    .form-grid { display: grid; gap: 12px; }
+    .field { display: grid; gap: 7px; }
+    .field label { font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: rgba(24,19,15,.55); font-weight: 600; }
+    .field input, .field textarea, .field select {
+      width: 100%;
+      border: 1px solid rgba(24,19,15,.12);
+      background: rgba(255,255,255,.62);
+      color: var(--ink);
+      border-radius: 18px;
+      min-height: 48px;
+      padding: 13px 15px;
+      outline: none;
+      font-size: 16px;
+      transition: border-color .2s ease, box-shadow .2s ease, background .2s ease;
+    }
+    .field textarea { resize: vertical; min-height: 132px; line-height: 1.65; }
+    .field input:focus, .field textarea:focus, .field select:focus {
+      border-color: rgba(185,150,99,.56);
+      box-shadow: 0 0 0 4px rgba(185,150,99,.13);
+      background: rgba(255,255,255,.84);
+    }
+
+    .login-screen {
+      position: fixed;
+      inset: 0;
+      z-index: 50;
+      display: none;
+      place-items: center;
+      padding: calc(20px + var(--safe-top)) 18px calc(20px + var(--safe-bottom));
+      background:
+        radial-gradient(circle at 20% 10%, rgba(216,189,142,.32), transparent 35vw),
+        linear-gradient(135deg, rgba(24,19,15,.88), rgba(67,48,32,.80));
+      backdrop-filter: blur(10px);
+      -webkit-backdrop-filter: blur(10px);
+    }
+    .login-screen.active { display: grid; }
+    .login-card {
+      width: min(480px, 100%);
+      padding: 28px;
+      border-radius: 34px;
+      background: rgba(255,250,243,.92);
+      border: 1px solid rgba(255,255,255,.68);
+      box-shadow: 0 30px 90px rgba(0,0,0,.25);
+      animation: viewIn .45s cubic-bezier(.22,1,.36,1) both;
+    }
+    .login-card h2 { margin: 14px 0 8px; font-family: Cinzel, Georgia, serif; font-weight: 500; font-size: 31px; }
+    .login-card p { margin: 0 0 20px; color: rgba(24,19,15,.56); line-height: 1.7; font-size: 13px; }
+
+    .chat-box { display: grid; gap: 14px; }
+    .chat-window {
+      min-height: 330px;
+      max-height: 52vh;
+      overflow: auto;
+      padding: 14px;
+      border-radius: 24px;
+      background: rgba(255,255,255,.42);
+      border: 1px solid rgba(24,19,15,.08);
+    }
+    .bubble { max-width: 84%; margin: 0 0 10px; padding: 12px 14px; border-radius: 20px; font-size: 13px; line-height: 1.65; white-space: pre-wrap; }
+    .bubble.user { margin-left: auto; color: #fff8ed; background: linear-gradient(135deg, #18130f, #493624); border-bottom-right-radius: 7px; }
+    .bubble.bot { background: rgba(255,255,255,.72); border: 1px solid rgba(24,19,15,.08); border-bottom-left-radius: 7px; }
+
+    .settings-list { display: grid; gap: 12px; }
+    .setting-row {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 12px;
+      align-items: center;
+      padding: 14px;
+      border-radius: 20px;
+      background: rgba(255,255,255,.42);
+      border: 1px solid rgba(24,19,15,.08);
+    }
+    .code-chip {
+      font-size: 11px;
+      padding: 8px 10px;
+      border-radius: 999px;
+      background: rgba(24,19,15,.08);
+      color: rgba(24,19,15,.68);
+      white-space: nowrap;
+    }
+
+    .toast {
+      position: fixed;
+      right: 18px;
+      bottom: calc(18px + var(--safe-bottom));
+      z-index: 80;
+      transform: translateY(18px);
+      opacity: 0;
+      pointer-events: none;
+      padding: 13px 16px;
+      border-radius: 18px;
+      color: #fff8ed;
+      background: rgba(24,19,15,.88);
+      border: 1px solid rgba(255,255,255,.14);
+      box-shadow: 0 18px 40px rgba(0,0,0,.22);
+      transition: opacity .25s ease, transform .25s ease;
+      font-size: 12px;
+    }
+    .toast.active { opacity: 1; transform: translateY(0); }
+
+    .mobile-backdrop { display: none; }
+
+    @keyframes viewIn { from { opacity: 0; transform: translateY(16px) scale(.985); } to { opacity: 1; transform: translateY(0) scale(1); } }
+    @keyframes itemIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+    @keyframes pulse { 0%,100% { transform: scale(1); opacity: 1; } 50% { transform: scale(.82); opacity: .72; } }
+    @keyframes glowDrift { from { transform: translate3d(-2%, -1%, 0) rotate(-2deg); } to { transform: translate3d(2%, 1%, 0) rotate(2deg); } }
+    @keyframes floatGlow { from { transform: translateY(0); } to { transform: translateY(-22px); } }
+
+    @media (max-width: 1120px) {
+      .app-shell { grid-template-columns: 1fr; }
+      .sidebar {
+        position: fixed;
+        z-index: 60;
+        inset: calc(12px + var(--safe-top)) auto calc(12px + var(--safe-bottom)) 12px;
+        width: min(320px, calc(100vw - 24px));
+        height: auto;
+        transform: translateX(calc(-100% - 22px));
+        transition: transform .45s cubic-bezier(.22,1,.36,1);
+      }
+      .sidebar.open { transform: translateX(0); }
+      .mobile-backdrop {
+        position: fixed;
+        inset: 0;
+        z-index: 55;
+        display: block;
+        opacity: 0;
+        pointer-events: none;
+        background: rgba(24,19,15,.36);
+        backdrop-filter: blur(4px);
+        -webkit-backdrop-filter: blur(4px);
+        transition: opacity .25s ease;
+      }
+      .mobile-backdrop.open { opacity: 1; pointer-events: auto; }
+      .mobile-menu-button { display: grid; }
+      .topbar { top: calc(10px + var(--safe-top)); }
+    }
+
+    @media (max-width: 820px) {
+      .app-shell { padding: calc(10px + var(--safe-top)) 10px calc(16px + var(--safe-bottom)); gap: 12px; }
+      .topbar { border-radius: 24px; padding: 10px; }
+      .page-title p { display: none; }
+      .page-title h1 { font-size: 22px; }
+      .top-actions .ghost-button { display: none; }
+      .hero-grid, .section-grid { grid-template-columns: 1fr; gap: 12px; }
+      .stats-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+      .hero-card, .panel-card { border-radius: 26px; }
+      .hero-card { min-height: auto; padding: 26px 22px; }
+      .hero-card h2 { font-size: 38px; line-height: 1.05; }
+      .hero-copy { font-size: 13px; }
+      .stat-card { min-height: 124px; padding: 16px; border-radius: 23px; }
+      .stat-value { font-size: 34px; }
+      .bar-row { grid-template-columns: 78px minmax(0, 1fr) 34px; }
+      .sidebar-footer { display: none; }
+    }
+
+    @media (max-width: 520px) {
+      .top-actions { gap: 7px; }
+      .pill-button { padding: 0 13px; }
+      .stats-grid { grid-template-columns: 1fr 1fr; }
+      .stat-card { min-height: 112px; }
+      .status-card { min-height: 210px; }
+      .setting-row { grid-template-columns: 1fr; }
+      .code-chip { justify-self: start; }
+    }
+  </style>
+</head>
+<body>
+  <div class="mobile-backdrop" id="mobileBackdrop"></div>
+  <div class="app-shell">
+    <aside class="sidebar" id="sidebar">
+      <div class="brand-card">
+        <div class="brand-row">
+          <div class="brand-mark">R</div>
+          <div>
+            <p class="brand-kicker">Ruth Istanbul</p>
+            <h2 class="brand-title">Ruthie</h2>
+          </div>
+        </div>
+        <p class="brand-subtitle">Safari ana ekrana ve masaüstü kullanıma uygun, Ruth Istanbul temasında yönetim paneli.</p>
+      </div>
+      <nav class="nav" aria-label="Panel menüsü">
+        <button class="nav-button active" data-view-button="dashboard"><span class="nav-icon">⌁</span><span class="nav-copy"><span class="nav-label">Genel Bakış</span><span class="nav-hint">Bugünkü durum</span></span></button>
+        <button class="nav-button" data-view-button="reports"><span class="nav-icon">◌</span><span class="nav-copy"><span class="nav-label">Raporlar</span><span class="nav-hint">Günlük kayıtlar</span></span></button>
+        <button class="nav-button" data-view-button="chat"><span class="nav-icon">✦</span><span class="nav-copy"><span class="nav-label">Sohbet Testi</span><span class="nav-hint">Ruthie yanıt kontrolü</span></span></button>
+        <button class="nav-button" data-view-button="settings"><span class="nav-icon">◇</span><span class="nav-copy"><span class="nav-label">Ayarlar</span><span class="nav-hint">Endpoint ve PWA</span></span></button>
+      </nav>
+      <div class="sidebar-footer">Temel server ve API yapısı korunur. Bu panel sadece görünen arayüzü yeniler.</div>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <button class="icon-button mobile-menu-button" id="menuButton" aria-label="Menüyü aç">☰</button>
+        <div class="page-title">
+          <p id="pageKicker">Ruthie Panel</p>
+          <h1 id="pageTitle">Genel Bakış</h1>
+        </div>
+        <div class="top-actions">
+          <button class="ghost-button" id="copyEndpointButton">Endpoint Kopyala</button>
+          <button class="pill-button primary" id="refreshButton">Yenile</button>
+        </div>
+      </header>
+
+      <section class="view active" id="view-dashboard">
+        <div class="hero-grid">
+          <div class="hero-card">
+            <p class="eyebrow">Canlı destek asistanı</p>
+            <h2>Ruthie paneli <span>yenilendi.</span></h2>
+            <p class="hero-copy">Telefon ekranında uygulama gibi, bilgisayarda masaüstü panel gibi çalışacak şekilde Ruth Istanbul’un sade lüks görünümüne taşındı.</p>
+            <div class="hero-actions">
+              <button class="pill-button primary" data-view-button="chat">Sohbeti Test Et</button>
+              <button class="pill-button" data-view-button="reports">Raporları Gör</button>
+            </div>
+          </div>
+          <div class="panel-card status-card">
+            <div class="status-top"><p class="mini-title">Bugünkü görüşme</p><span class="status-dot"></span></div>
+            <p class="big-number" id="todayConversationCount">0</p>
+            <p class="muted" id="todayStatusText">Veriler yükleniyor.</p>
+          </div>
+        </div>
+
+        <div class="stats-grid">
+          <div class="stat-card"><p class="stat-label">Bugünkü mesaj</p><p class="stat-value" id="todayMessageCount">0</p><p class="stat-note">Müşteri mesaj kayıtları</p></div>
+          <div class="stat-card"><p class="stat-label">Bugünkü fotoğraf</p><p class="stat-value" id="todayImageCount">0</p><p class="stat-note">Eklenen görsel sayısı</p></div>
+          <div class="stat-card"><p class="stat-label">Toplam görüşme</p><p class="stat-value" id="totalConversationCount">0</p><p class="stat-note">Kayıtlı tüm dönem</p></div>
+          <div class="stat-card"><p class="stat-label">Toplam mesaj</p><p class="stat-value" id="totalMessageCount">0</p><p class="stat-note">Ruthie geçmişi</p></div>
+        </div>
+
+        <div class="section-grid">
+          <div class="panel-card">
+            <div class="card-head"><div><h3>Son günler</h3><p>Günlük görüşme yoğunluğu.</p></div></div>
+            <div class="bar-chart" id="barChart"></div>
+          </div>
+          <div class="panel-card">
+            <div class="card-head"><div><h3>Bugün konuşanlar</h3><p>İsim gelmediyse anonim görünür.</p></div></div>
+            <div class="person-list" id="peopleList"></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="view" id="view-reports">
+        <div class="panel-card">
+          <div class="card-head"><div><h3>Günlük raporlar</h3><p>Tüm kayıtlı günler burada temiz kartlarla listelenir.</p></div><button class="pill-button" id="downloadReportButton">JSON İndir</button></div>
+          <div class="timeline-list" id="reportList"></div>
+        </div>
+      </section>
+
+      <section class="view" id="view-chat">
+        <div class="section-grid">
+          <div class="panel-card">
+            <div class="card-head"><div><h3>Sohbet testi</h3><p>Ruthie’nin müşteri tarafında nasıl cevap verdiğini buradan deneyebilirsin.</p></div></div>
+            <div class="chat-box">
+              <div class="chat-window" id="chatWindow"></div>
+              <div class="form-grid">
+                <div class="field"><label>Test mesajı</label><textarea id="chatMessage" placeholder="Örn: Bu kolyenin materyali nedir?"></textarea></div>
+                <button class="pill-button primary" id="sendChatButton">Mesajı Gönder</button>
+              </div>
+            </div>
+          </div>
+          <div class="panel-card">
+            <div class="card-head"><div><h3>Hızlı not</h3><p>Bu alan sadece test içindir. Gerçek müşterinin sohbet akışını bozmaz.</p></div></div>
+            <div class="settings-list">
+              <div class="setting-row"><div><strong>API</strong><br><span class="muted">/api/chat aynı şekilde çalışıyor.</span></div><span class="code-chip">POST</span></div>
+              <div class="setting-row"><div><strong>Rapor</strong><br><span class="muted">Gizli kodla günlük rapor alınır.</span></div><span class="code-chip">/api/admin/report</span></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="view" id="view-settings">
+        <div class="section-grid">
+          <div class="panel-card">
+            <div class="card-head"><div><h3>Panel ayarları</h3><p>Bu panel ana ekrana eklenebilir ve masaüstünde uygulama gibi kullanılabilir.</p></div></div>
+            <div class="settings-list">
+              <div class="setting-row"><div><strong>Canlı destek endpoint</strong><br><span class="muted">Sitedeki sohbet baloncuğunun kullanacağı adres.</span></div><span class="code-chip" id="chatEndpointChip">/api/chat</span></div>
+              <div class="setting-row"><div><strong>Yönetici raporu</strong><br><span class="muted">Gizli kod girilince istatistikleri gösterir.</span></div><span class="code-chip">/api/admin/report</span></div>
+              <div class="setting-row"><div><strong>Safari ana ekran</strong><br><span class="muted">Paylaş → Ana Ekrana Ekle ile tam ekran açılır.</span></div><span class="code-chip">PWA</span></div>
+            </div>
+          </div>
+          <div class="panel-card">
+            <div class="card-head"><div><h3>Gizli kod</h3><p>Kodu değiştirirsen panel tekrar giriş ister.</p></div></div>
+            <div class="form-grid">
+              <div class="field"><label>RUTHIE_OWNER_SECRET</label><input id="secretInputInline" type="password" placeholder="Gizli kod" /></div>
+              <button class="pill-button primary" id="saveSecretInlineButton">Kaydet ve Yenile</button>
+              <button class="ghost-button" id="logoutButton">Panelden Çık</button>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div class="login-screen" id="loginScreen">
+    <div class="login-card">
+      <div class="brand-mark">R</div>
+      <h2>Ruthie Panel</h2>
+      <p>Panel raporlarını görmek için Render ortam değişkenindeki <strong>RUTHIE_OWNER_SECRET</strong> kodunu gir.</p>
+      <div class="form-grid">
+        <div class="field"><label>Gizli kod</label><input id="secretInput" type="password" placeholder="Panel kodu" autocomplete="current-password" /></div>
+        <button class="pill-button primary" id="saveSecretButton">Panele Gir</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="toast" id="toast">Kopyalandı</div>
+
+  <script>
+    (function () {
+      var state = {
+        secret: localStorage.getItem('ruthie_owner_secret') || '',
+        report: null,
+        currentView: 'dashboard',
+        sessionId: localStorage.getItem('ruthie_panel_session') || ('panel_' + Date.now() + '_' + Math.random().toString(16).slice(2))
+      };
+      localStorage.setItem('ruthie_panel_session', state.sessionId);
+
+      var titles = {
+        dashboard: ['Ruthie Panel', 'Genel Bakış'],
+        reports: ['Günlük kayıtlar', 'Raporlar'],
+        chat: ['Yanıt kontrolü', 'Sohbet Testi'],
+        settings: ['Panel kullanımı', 'Ayarlar']
+      };
+
+      var els = {
+        login: document.getElementById('loginScreen'),
+        secretInput: document.getElementById('secretInput'),
+        secretInputInline: document.getElementById('secretInputInline'),
+        pageKicker: document.getElementById('pageKicker'),
+        pageTitle: document.getElementById('pageTitle'),
+        sidebar: document.getElementById('sidebar'),
+        backdrop: document.getElementById('mobileBackdrop'),
+        toast: document.getElementById('toast'),
+        chatWindow: document.getElementById('chatWindow'),
+        chatMessage: document.getElementById('chatMessage')
+      };
+
+      function init() {
+        document.querySelectorAll('[data-view-button]').forEach(function (button) {
+          button.addEventListener('click', function () { openView(button.getAttribute('data-view-button')); });
+        });
+        document.getElementById('menuButton').addEventListener('click', openMenu);
+        els.backdrop.addEventListener('click', closeMenu);
+        document.getElementById('refreshButton').addEventListener('click', loadReport);
+        document.getElementById('copyEndpointButton').addEventListener('click', copyEndpoint);
+        document.getElementById('downloadReportButton').addEventListener('click', downloadReport);
+        document.getElementById('saveSecretButton').addEventListener('click', saveSecretFromLogin);
+        document.getElementById('saveSecretInlineButton').addEventListener('click', saveSecretInline);
+        document.getElementById('logoutButton').addEventListener('click', logout);
+        document.getElementById('sendChatButton').addEventListener('click', sendChat);
+        els.secretInput.addEventListener('keydown', function (event) { if (event.key === 'Enter') saveSecretFromLogin(); });
+        if ('serviceWorker' in navigator) {
+          navigator.serviceWorker.register('/sw.js').catch(function () {});
+        }
+        if (!state.secret) {
+          showLogin();
+        } else {
+          els.secretInputInline.value = state.secret;
+          loadReport();
+        }
+        openView('dashboard');
+      }
+
+      function showLogin() { els.login.classList.add('active'); setTimeout(function () { els.secretInput.focus(); }, 80); }
+      function hideLogin() { els.login.classList.remove('active'); }
+      function saveSecretFromLogin() {
+        var value = els.secretInput.value.trim();
+        if (!value) return showToast('Gizli kod gerekli');
+        state.secret = value;
+        localStorage.setItem('ruthie_owner_secret', value);
+        els.secretInputInline.value = value;
+        hideLogin();
+        loadReport();
+      }
+      function saveSecretInline() {
+        var value = els.secretInputInline.value.trim();
+        if (!value) return showToast('Gizli kod gerekli');
+        state.secret = value;
+        localStorage.setItem('ruthie_owner_secret', value);
+        loadReport();
+        showToast('Kod kaydedildi');
+      }
+      function logout() {
+        localStorage.removeItem('ruthie_owner_secret');
+        state.secret = '';
+        showLogin();
+      }
+
+      function openMenu() { els.sidebar.classList.add('open'); els.backdrop.classList.add('open'); }
+      function closeMenu() { els.sidebar.classList.remove('open'); els.backdrop.classList.remove('open'); }
+
+      function openView(name) {
+        if (!name) return;
+        state.currentView = name;
+        document.querySelectorAll('.view').forEach(function (view) { view.classList.remove('active'); });
+        var target = document.getElementById('view-' + name);
+        if (target) target.classList.add('active');
+        document.querySelectorAll('.nav-button').forEach(function (button) {
+          button.classList.toggle('active', button.getAttribute('data-view-button') === name);
+        });
+        var title = titles[name] || titles.dashboard;
+        els.pageKicker.textContent = title[0];
+        els.pageTitle.textContent = title[1];
+        closeMenu();
+      }
+
+      async function loadReport() {
+        if (!state.secret) return showLogin();
+        try {
+          setLoading(true);
+          var response = await fetch('/api/admin/report?code=' + encodeURIComponent(state.secret), { cache: 'no-store' });
+          var data = await response.json();
+          if (!response.ok || !data.ok) {
+            showLogin();
+            showToast('Kod hatalı olabilir');
+            return;
+          }
+          state.report = data.report;
+          renderReport();
+        } catch (error) {
+          showToast('Rapor yüklenemedi');
+        } finally {
+          setLoading(false);
+        }
+      }
+
+      function setLoading(isLoading) {
+        document.getElementById('refreshButton').textContent = isLoading ? 'Yükleniyor' : 'Yenile';
+      }
+
+      function renderReport() {
+        var report = state.report || {};
+        var today = report.today || {};
+        setText('todayConversationCount', today.conversationCount || 0);
+        setText('todayMessageCount', today.messageCount || 0);
+        setText('todayImageCount', today.imageCount || 0);
+        setText('totalConversationCount', report.totalConversations || 0);
+        setText('totalMessageCount', report.totalMessages || 0);
+        setText('todayStatusText', today.lastMessageAt ? 'Son görüşme: ' + formatDateTime(today.lastMessageAt) : 'Bugün henüz kayıt yok.');
+        renderPeople(today.people || {});
+        renderBars(report.days || []);
+        renderReportList(report.days || []);
+      }
+
+      function renderPeople(peopleMap) {
+        var people = Object.values(peopleMap || {}).filter(Boolean);
+        var box = document.getElementById('peopleList');
+        if (!people.length) {
+          box.innerHTML = '<div class="person-item"><div class="avatar">R</div><div class="item-copy"><strong>Henüz görüşme yok</strong><span>Bugünkü kişiler burada görünür.</span></div></div>';
+          return;
+        }
+        box.innerHTML = people.slice(0, 8).map(function (name, index) {
+          var initial = String(name || 'R').trim().charAt(0).toUpperCase() || 'R';
+          return '<div class="person-item" style="animation-delay:' + (index * 35) + 'ms"><div class="avatar">' + escapeHtml(initial) + '</div><div class="item-copy"><strong>' + escapeHtml(name) + '</strong><span>Bugünkü görüşme</span></div></div>';
+        }).join('');
+      }
+
+      function renderBars(days) {
+        var recent = (days || []).slice(-7);
+        var box = document.getElementById('barChart');
+        if (!recent.length) {
+          box.innerHTML = '<div class="bar-row"><span>Veri yok</span><div class="bar-track"><div class="bar-fill" style="width:0%"></div></div><strong>0</strong></div>';
+          return;
+        }
+        var max = Math.max.apply(null, recent.map(function (item) { return item.conversationCount || 0; }).concat([1]));
+        box.innerHTML = recent.map(function (item) {
+          var count = item.conversationCount || 0;
+          var width = Math.max(5, Math.round((count / max) * 100));
+          return '<div class="bar-row"><span>' + escapeHtml(item.date) + '</span><div class="bar-track"><div class="bar-fill" style="width:' + width + '%"></div></div><strong>' + count + '</strong></div>';
+        }).join('');
+      }
+
+      function renderReportList(days) {
+        var box = document.getElementById('reportList');
+        var list = (days || []).slice().reverse();
+        if (!list.length) {
+          box.innerHTML = '<div class="timeline-item"><div class="avatar">R</div><div class="item-copy"><strong>Henüz kayıt yok</strong><span>Sohbet geldikçe burada listelenir.</span></div></div>';
+          return;
+        }
+        box.innerHTML = list.map(function (item, index) {
+          var people = (item.people || []).filter(Boolean).slice(0, 3).join(', ') || 'Anonim ziyaretçi';
+          return '<div class="timeline-item" style="animation-delay:' + (index * 28) + 'ms"><div class="avatar">' + (index + 1) + '</div><div class="item-copy"><strong>' + escapeHtml(item.date) + ' · ' + (item.conversationCount || 0) + ' görüşme</strong><span>' + (item.messageCount || 0) + ' mesaj · ' + (item.imageCount || 0) + ' fotoğraf · ' + escapeHtml(people) + '</span></div></div>';
+        }).join('');
+      }
+
+      async function sendChat() {
+        var message = els.chatMessage.value.trim();
+        if (!message) return showToast('Mesaj yaz');
+        addBubble(message, 'user');
+        els.chatMessage.value = '';
+        try {
+          var response = await fetch('/api/chat', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ message: message, sessionId: state.sessionId, visitorName: 'Panel Test', pageTitle: 'Ruthie Panel', pageUrl: '/panel' })
+          });
+          var data = await response.json();
+          addBubble(data.message || 'Yanıt alınamadı.', 'bot');
+        } catch (error) {
+          addBubble('Test mesajı gönderilemedi.', 'bot');
+        }
+      }
+
+      function addBubble(text, type) {
+        var div = document.createElement('div');
+        div.className = 'bubble ' + type;
+        div.textContent = text;
+        els.chatWindow.appendChild(div);
+        els.chatWindow.scrollTop = els.chatWindow.scrollHeight;
+      }
+
+      function downloadReport() {
+        if (!state.report) return showToast('Rapor yok');
+        var blob = new Blob([JSON.stringify(state.report, null, 2)], { type: 'application/json' });
+        var url = URL.createObjectURL(blob);
+        var a = document.createElement('a');
+        a.href = url;
+        a.download = 'ruthie-rapor-' + (state.report.todayKey || 'panel') + '.json';
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+      }
+
+      function copyEndpoint() {
+        var endpoint = location.origin + '/api/chat';
+        navigator.clipboard.writeText(endpoint).then(function () { showToast('Endpoint kopyalandı'); }).catch(function () { showToast(endpoint); });
+      }
+
+      function setText(id, value) { var el = document.getElementById(id); if (el) el.textContent = value; }
+      function formatDateTime(value) {
+        try { return new Intl.DateTimeFormat('tr-TR', { dateStyle: 'short', timeStyle: 'short' }).format(new Date(value)); }
+        catch (error) { return value || ''; }
+      }
+      function escapeHtml(value) {
+        return String(value == null ? '' : value).replace(/[&<>'"]/g, function (char) {
+          return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' })[char];
+        });
+      }
+      var toastTimer = null;
+      function showToast(message) {
+        els.toast.textContent = message;
+        els.toast.classList.add('active');
+        clearTimeout(toastTimer);
+        toastTimer = setTimeout(function () { els.toast.classList.remove('active'); }, 2200);
+      }
+
+      init();
+    })();
+  </script>
+</body>
+</html>`;
+}
